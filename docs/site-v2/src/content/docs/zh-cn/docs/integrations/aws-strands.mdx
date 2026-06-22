@@ -1,0 +1,214 @@
+---
+title: "用 SpendGuard 给 AWS Strands 做预算管控"
+description: >-
+  用 Agentic SpendGuard 给 AWS Strands Agents (strands-agents)
+  做调用前的 token 预算管控。一个 HookProvider 覆盖所有 model 后端 ——
+  Bedrock、OpenAI、Anthropic、Gemini、Ollama、LiteLLM ——
+  因为拦截点落在 agent-runtime 边界,而不是 model 边界。
+---
+
+> 你的 AWS Strands `Agent` 刚在一个走 Bedrock 的 Claude
+> Sonnet model 上撞进了失控的 tool loop。每一轮都派发出一个
+> `InvokeModel` HTTP 请求。没有 gate 的话,等你发现成本时,它已经躺在
+> 下个月的账单仪表盘上了。SpendGuard 通过 `hooks=[provider]`
+> 往 Strands 的强类型 event bus 里塞一个
+> `SpendGuardStrandsHookProvider`,让每次 model 调用在上游请求发出
+> *之前* 先对一笔预算做 reserve —— 同一个 provider 换成 OpenAI、
+> Gemini、Ollama 或 LiteLLM 后端,零改动照样跑。
+
+## 为什么你会需要它
+
+- **一个 provider,覆盖所有后端。** Strands 的 `Model` 抽象是
+  多态的(Bedrock / OpenAI / Anthropic / Gemini / Ollama / LiteLLM)。
+  在 agent-runtime 边界拦截,意味着同一个 provider 实例就覆盖了全部;
+  你不用为每个 vendor 写 wrapper。
+- **调用前拒绝,而非事后记账。** DENY 会在 Strands 派发 model HTTP
+  *之前* 抛出 `DecisionDenied`。上游调用 **永远** 不会发出 ——
+  这一点由 `agent_real_strands_deny` demo 验证,它断言 DENY 那一轮
+  counting-stub 的命中数保持不变。
+- **Bedrock 优先,但对 model 不挑食。** 读 `result.usage` 的字段
+  形状(Anthropic 的 `input_tokens`/`output_tokens`、OpenAI 的
+  `prompt_tokens`/`completion_tokens`、LiteLLM 归一化后的)——
+  不需要解析任何 model 字符串。
+- **审计 + 审批流水线跟其他所有 framework 共用。** 这个 provider 写入的
+  SpendGuard ledger,跟 LangChain、Pydantic-AI、OpenAI Agents、Google ADK
+  这些集成用的是同一套。
+
+## 接入(60 秒)
+
+```bash
+pip install 'spendguard-sdk[strands]'
+```
+
+通过 demo 栈起一个 sidecar:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## 接线
+
+```python
+import asyncio
+
+from strands import Agent
+from strands.models.bedrock import BedrockModel
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.strands import (
+    SpendGuardStrandsHookProvider,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="anthropic.claude-3-5-sonnet",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def estimate(invocation):
+        # Conservative: reserve 500 atomic per call (above
+        # Sonnet's typical ~30-token short response).
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget", unit=unit, amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    def reconcile(invocation, result):
+        usage = result.usage
+        total = (
+            getattr(usage, "total_tokens", None)
+            or ((getattr(usage, "input_tokens", 0) or 0)
+                + (getattr(usage, "output_tokens", 0) or 0))
+        )
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget", unit=unit, amount_atomic=str(total),
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    guard = SpendGuardStrandsHookProvider(
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate,
+        claim_reconciler=reconcile,
+    )
+
+    agent = Agent(
+        model=BedrockModel(
+            model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
+        ),
+        hooks=[guard],
+    )
+    result = await agent.invoke_async(prompt="Say hello in three words.")
+    print(result.message)
+
+
+asyncio.run(main())
+```
+
+## 你得到了什么
+
+- **调用前预算 reserve**,覆盖每一次 `Agent.invoke_async()`,
+  tool-loop 的每轮迭代也算在内。
+- **靠字段形状做多 vendor 覆盖。** Bedrock / OpenAI / Anthropic /
+  Gemini / Ollama / LiteLLM 全都从 `result.usage` 的字段形状里抽取
+  usage —— 不做 model 字符串匹配。
+- **并发安全。** Strands 每次 attempt 都分配一个新的 `invocation_id`;
+  provider 的 stash 按这个 id 做 key,所以对多个
+  `agent.invoke_async()` 调用做 `asyncio.gather` 永远不会撞车。
+- **DEGRADE 默认 fail closed。** 设
+  `SPENDGUARD_STRANDS_FAIL_OPEN=1`(env)或 `fail_closed=False`
+  (构造参数)可切到仅供开发用的 fail-open 行为。
+
+## Model 后端覆盖矩阵
+
+| 后端 | 覆盖程度 | CI 中测过 | 说明 |
+|---------|----------|--------------|-------|
+| `BedrockModel` | v1 已验证 | 是 | Anthropic 形状的 usage(`input_tokens` / `output_tokens`)。AWS 体系里的承重件。 |
+| `OpenAIModel` | v1 已验证 | 是 | OpenAI 形状的 usage(`prompt_tokens` / `completion_tokens` / `total_tokens`)。 |
+| `AnthropicModel` | v1 已验证 | 是 | 跟走 Anthropic 的 Bedrock 同一种形状。 |
+| `LiteLLMModel` | v1 已验证 | 是 | LiteLLM 归一化形状;覆盖经 LiteLLM 走的 Gemini / Cohere / Llama。 |
+| `GeminiModel` | v1 已覆盖 | 间接 | 在录制好的 fixture 矩阵里走的是 LiteLLM。 |
+| `OllamaModel` | v1 已覆盖 | 否 | 经 Ollama 的兼容层跟 OpenAI 同一种形状;不在 CI 矩阵里。 |
+
+加一个新后端 = 往
+`tests/integrations/strands/test_hook_provider.py::test_I02_multi_backend_allow_path`
+里加第四行。
+
+## 常见用法
+
+### 跨 framework 的 run_id 关联
+
+```python
+from spendguard.integrations.strands import (
+    StrandsRunContext, run_context,
+)
+
+async with run_context(StrandsRunContext(run_id="my-parent-run-1")):
+    result = await agent.invoke_async(prompt="hello")
+```
+
+Strands 的 event bus 本身就端到端带着 `invocation_id`,所以
+`StrandsRunContext` 是 **可选的**(不像 LangChain / MAF 那样必须显式
+绑一个)。只有当你要把一个 Strands run 桥接到来自另一个 framework 的
+父 trace 时才用它。
+
+### DENY 行为
+
+当 `request_decision` 返回 DENY 时,provider 会:
+
+1. 直接抛出 `DecisionDenied`。
+2. Strands 把它包成 `HookExecutionError`;调用方通过
+   `__cause__` 链来捕获:
+   ```python
+   try:
+       await agent.invoke_async(prompt="...")
+   except Exception as exc:
+       if isinstance(exc.__cause__, DecisionDenied):
+           # handle the budget refusal
+           ...
+   ```
+3. model HTTP **永远** 不会发出(由 `agent_real_strands_deny` demo 验证)。
+4. 不会往 stash 里写任何东西 —— 不会触发 commit 也不会触发 release。
+
+### DEGRADE 行为
+
+DEGRADE 表示 sidecar 返回了一个非 CONTINUE 的结果,而 adapter 不该
+因此阻断(比如一次临时的降级)。默认情况下 provider fail closed,抛出
+`SpendGuardDegradeBlocked`。设 `fail_closed=False` 或
+`SPENDGUARD_STRANDS_FAIL_OPEN=1` 可放行这次调用;那种情况下不会产出
+commit 行(reserve 走 TTL-sweep 回收)。
+
+### Tool 回调
+
+通过 `before_tool` / `after_tool` 做 per-tool 预算不在 v1 范围内。
+Tool 成本会并进父 invocation 的 estimator/reconciler 里。Per-tool 拦截
+作为 D20.1 跟踪。
+
+### 流式 `on_message`
+
+invocation 内的流式 token 拦截在 v1 里不支持;commit 只在
+`after_invocation` 触发。当 `result.usage` 为 `None` 时(标准 Strands
+runtime 下很罕见),走 estimator-snapshot 兜底。
+
+## 相关
+
+- [快速上手](/docs/quickstart/) —— 5 分钟把整套栈跑起来
+- [Contract DSL 参考](/docs/contracts/yaml/) —— 编写 allow/stop 规则
+- 其他集成:[Google ADK](/docs/integrations/adk/) · [Pydantic-AI](/docs/integrations/pydantic-ai/) · [LangChain & LangGraph](/docs/integrations/langchain/) · [OpenAI Agents SDK](/docs/integrations/openai-agents/) · [Microsoft Agent Framework](/docs/integrations/microsoft-agent-framework/)

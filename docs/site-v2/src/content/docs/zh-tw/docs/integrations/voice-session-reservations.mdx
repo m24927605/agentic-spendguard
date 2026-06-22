@@ -1,0 +1,140 @@
+---
+title: "語音 session 預留 (substrate)"
+description: >-
+  針對長時間運作的 LiveKit 與 Pipecat 語音 agent，提供 session 範圍的 reserve、串流
+  commit、replay/重連、release 與 TTL 到期的 substrate。這是共用的 D41 substrate，本身
+  並不是某個框架的 adapter hook。
+---
+
+> **是 substrate，不是 adapter。** D41 session 預留是 LiveKit 與 Pipecat 語音 adapter
+> 都必須使用的共用 budget 生命週期。這一頁不主張我們有 LiveKit 或 Pipecat 的 adapter
+> 覆蓋率；它只是把這些 adapter 所相依的預留 contract 寫清楚。
+
+即時語音 agent 會把一個 session 一直開著，而花費會跨 STT、LLM 回合、tool 呼叫、串流
+回應、TTS 輸出一路累積上去。用 request 範圍的 reserve 沒辦法乾淨地描述這種生命週期。
+D41 補上一個 session 範圍的 ledger hold，這樣語音 adapter 就可以在付費 session 開始前
+先 reserve 一個額度信封，session 進行中把正值的串流 delta commit 進去，等 session 結束
+或到期時再把剩下的額度 release 掉。
+
+```text
+voice room connect
+  -> ReserveSession      # hold session budget before paid provider dispatch
+  -> CommitSessionDelta  # positive idempotent streaming deltas
+  -> CommitSessionDelta  # reconnect replays by streaming_commit_id
+  -> ReleaseSession      # release uncommitted remainder
+  -> SessionExpire       # TTL safety net for crashed sessions
+```
+
+## 哪些路徑會被 gate
+
+| 路徑 | 狀態 |
+|---|---|
+| Session 開始 | `ReserveSession` 會在語音 adapter 接上付費 model 流量之前，先建立一筆 ledger hold。 |
+| 串流花費 | `CommitSessionDelta` 把正值且 idempotent 的 delta 套用到這筆 hold 上。 |
+| 重連 / replay | 一模一樣的 replay 會回傳原本的 outcome；同一把 key 但 payload 不同就會 conflict。 |
+| 超量 | commit delta 超過 hold 的額度會被 deny，而且不會去動到已 commit 或已 release 的餘額。 |
+| 結束 / crash | `ReleaseSession` 把剩餘額度 release 掉；如果 adapter 不見了，TTL 到期也會把剩餘額度 release 掉。 |
+
+這筆 hold 不是信用額度。每一次 commit 都會減少 hold 的剩餘額度，同時增加已 commit 的
+花費。release 或到期只會把還沒 commit 的剩餘額度結算回可用 budget。
+
+## Contract
+
+這套 substrate 釘在現有的 sidecar adapter service 裡：
+
+<div is:raw>
+
+```text
+rpc ReserveSession(ReserveSessionRequest) returns (ReserveSessionOutcome)
+rpc CommitSessionDelta(CommitSessionDeltaRequest) returns (CommitSessionDeltaOutcome)
+rpc ReleaseSession(ReleaseSessionRequest) returns (ReleaseSessionOutcome)
+```
+
+</div>
+
+`ReserveSessionRequest` 要帶上現行 SpendGuard substrate 在 reserve 時的那組標準
+tuple：`tenant_id`、`budget_id`、`window_instance_id`、`unit`、`pricing`、
+`session_id`、`route`、`estimated_amount_atomic`、`ttl_seconds`，以及
+`idempotency_key`。
+
+凡是用到這套 substrate 的新 adapter，從第一天起就要把 `unitId`、`windowInstanceId`
+跟那組 pricing freeze tuple 串進去。ledger commit 會把 tuple 漂移的情況擋下來。
+
+目前的收尾狀態：sidecar 那幾個 UDS method 是 compile-safe、fail-closed 的
+`UNIMPLEMENTED` stub。本機的 D41 demo 直接驗證 ledger 的 session 生命週期跟 canonical
+audit 路徑。在 LiveKit 或 Pipecat adapter 真的去呼叫這些 session RPC 之前，必須先把
+sidecar 到 ledger 的橋接 slice `COV_D41S_06_sidecar_session_bridge` 做完上線。
+
+## Audit Chain
+
+Session 生命週期事件會以簽章過的 audit decision/outcome 配對寫入，並透過既有的 audit
+路徑做 canonicalize。事件家族如下：
+
+| 事件 | 何時送出 |
+|---|---|
+| `spendguard.audit.session.reserve` | session hold 被接受。 |
+| `spendguard.audit.session.commit_delta` | 串流 delta 被 commit。 |
+| `spendguard.audit.session.release` | 剩餘額度被 release。 |
+| `spendguard.audit.session.expired` | TTL sweep 把剩餘額度 release 掉。 |
+| `spendguard.audit.session.denied` | session reserve 或超量被 deny。 |
+
+Reserve DENY 會把完整的 typed outcome 回給 caller，連同當下的可用額度一起；而簽章過的
+audit outcome 則保留具決定性的拒絕事實，這些事實在 replay 時是穩定不變的。
+
+## 跑 Demo
+
+<div is:raw>
+
+```bash
+make -C deploy/demo demo-down
+make -C deploy/demo demo-up DEMO_MODE=session_reservation
+make -C deploy/demo demo-verify-session-reservation
+```
+
+</div>
+
+成功時 runner 會印出這一行：
+
+<div is:raw>
+
+```text
+[demo] session_reservation ALL 7 steps PASS
+```
+
+</div>
+
+這個 demo 用的是真的 Postgres ledger 跟 canonical 資料庫。它涵蓋了一個主要的 reserve、
+兩次正值 commit、idempotent replay、conflict 偵測、超量 deny、release、一個真實的
+budget 不足 reserve DENY（含 replay/conflict 檢查），以及第二筆會走 TTL 到期的預留。
+hard gate 會斷言剛好有八組簽章過的 decision/outcome 配對，範圍鎖在那三個 demo session
+reservation ID 上。
+
+## Adapter Handoff
+
+LiveKit 跟 Pipecat 的 adapter 開發，應該去參考鎖定好的 D41 substrate 設計跟 sidecar
+橋接 spec，不要自己另外發明一套本機的語音生命週期。我們預期 adapter 程式碼要做的是：把
+框架的 session/room ID 轉成 `session_id`、在付費 provider 工作開始前先 reserve、用穩定的
+`streaming_commit_id` 值去 commit 正值的串流 delta，並在 session 結束時 release，至於
+crash 復原就靠 TTL 兜底。
+
+在 sidecar 橋接 demo 證明 UDS 路徑可行之前，runtime adapter 的工作都先卡住：
+
+<div is:raw>
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=session_bridge
+make -C deploy/demo demo-verify-session-bridge
+```
+
+</div>
+
+## 連結
+
+- Demo overlay：
+  [`deploy/demo/session_reservation/`](https://github.com/m24927605/agentic-spendguard/tree/main/deploy/demo/session_reservation)
+- 鎖定的 substrate spec：
+  [`docs/specs/coverage/D41_session_reservation_substrate/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D41_session_reservation_substrate)
+- Sidecar 橋接 spec：
+  [`docs/specs/coverage/D41_sidecar_session_bridge/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D41_sidecar_session_bridge)
+- Slice 文件：
+  [`docs/slices/COV_D41S_01_session_contract_spec_and_proto.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/slices/COV_D41S_01_session_contract_spec_and_proto.md)

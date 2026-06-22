@@ -1,0 +1,330 @@
+---
+title: "Microsoft Agent Framework (MAF) — SpendGuardMiddleware(双语)"
+description: >-
+  在 .NET 8(Spendguard.AgentFramework NuGet)和 Python
+  (spendguard-sdk[agent-framework])两侧把 Agentic SpendGuard 作为
+  Microsoft Agent Framework 中间件接入。.NET 侧靠
+  services.AddSpendGuard(...) + UseSpendGuard(sp) 直接挂上,Python 侧用
+  SpendGuardMiddleware(client=..., ...)。在上游 HTTP 请求发出之前先做调用前
+  预算预留,调用后再用真实 token 用量做 commit 对账,全程签名审计链。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+
+> [Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework)
+> 于 2026-04 GA,作为 Semantic Kernel + AutoGen 的统一继任者
+>(这两条上游线现在都只做维护)。它同时发布 **.NET**
+>(`Microsoft.Agents.AI` + `Microsoft.Extensions.AI`)和 **Python**
+>(`agent_framework`)两套实现,在 chat-client 边界上提供了 wire 稳定的
+> `ChatMiddleware` 契约。SpendGuard 就插在这个边界上,两种语言都有 ——
+> .NET 用 `IChatClient.UseSpendGuard(sp)`,Python 用
+> `SpendGuardMiddleware(client=..., ...)`,所以一份设计文档加一套 demo
+> 矩阵就能覆盖两边。
+
+<Aside type="note">
+这是嵌在 **MAF 自身 chat-client 流水线内部** 的 SpendGuard 中间件。如果你要的是
+上一层的策略引擎视角(Microsoft Agent Governance Toolkit),看
+[Microsoft AGT](../agt/)。两者可以叠加 —— 见下面的
+[与 AGT 共存](#coexistence-with-agt)。
+</Aside>
+
+## 安装
+
+### .NET
+
+```bash
+dotnet add package Spendguard.AgentFramework
+dotnet add package Microsoft.Agents.AI.Abstractions
+dotnet add package Microsoft.Extensions.AI.Abstractions
+```
+
+`Spendguard.AgentFramework` 目标框架是 `net8.0`。该中间件继承
+`Microsoft.Extensions.AI.DelegatingChatClient`,因此能插进任何
+`IChatClient` 形态的流水线 —— 不管是
+`Microsoft.Agents.AI.ChatAgent`(MAF GA 的 agent)还是手写的
+`IChatClient` 消费方,都从同一道接缝过闸。
+
+### Python
+
+```bash
+pip install 'spendguard-sdk[agent-framework]'
+```
+
+`agent-framework>=1.0,<2` 作为可选 extra 拉进来。继承自
+`agent_framework.ChatMiddleware` 的 `SpendGuardMiddleware` 子类就是这个
+集成对外的公开接口。
+
+## 快速上手
+
+### .NET
+
+```csharp
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
+using Spendguard.AgentFramework.Extensions;
+using Spendguard.AgentFramework.Options;
+
+var services = new ServiceCollection();
+services.AddLogging();
+services.AddSpendGuard(o =>
+{
+    o.TenantId        = "00000000-0000-4000-8000-000000000001";
+    o.BudgetId        = "44444444-4444-4444-8444-444444444444";
+    o.WindowInstanceId = "55555555-5555-4555-8555-555555555555";
+    o.SidecarSocketPath = "/var/run/spendguard/adapter.sock";
+    o.OnSidecarUnavailable = OnSidecarUnavailable.Deny;
+});
+
+await using var sp = services.BuildServiceProvider();
+IChatClient inner = /* OpenAIChatClient / AzureChatClient / etc. */;
+IChatClient gated = inner.UseSpendGuard(sp);
+
+var resp = await gated.GetResponseAsync(new[]
+{
+    new ChatMessage(ChatRole.User, "hello"),
+});
+```
+
+同一个过闸后的 `IChatClient` 可以直接交给 `ChatAgent`:
+
+```csharp
+using Microsoft.Agents.AI;
+
+var agent = new ChatAgent(gated, instructions: "Be brief.");
+var result = await agent.RunAsync("hello");
+```
+
+### Python
+
+```python
+import asyncio
+
+from agent_framework import ChatAgent
+from agent_framework.openai import OpenAIChatClient
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.agent_framework import (
+    SpendGuardAgentFrameworkOptions,
+    SpendGuardMiddleware,
+    run_context,
+    RunContext,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+        runtime_kind="microsoft-agent-framework-python",
+    )
+    await client.connect()
+    await client.handshake()
+
+    options = SpendGuardAgentFrameworkOptions(
+        tenant_id="00000000-0000-4000-8000-000000000001",
+        budget_id="44444444-4444-4444-8444-444444444444",
+        window_instance_id="55555555-5555-4555-8555-555555555555",
+        sidecar_socket_path="/var/run/spendguard/adapter.sock",
+    )
+
+    def _claim_estimator(messages):
+        claim = common_pb2.BudgetClaim()
+        claim.budget_id = options.budget_id
+        claim.window_instance_id = options.window_instance_id
+        claim.amount_atomic = "1000000"  # placeholder; real cost is from pricing
+        claim.unit.unit_id = "usd_micros"
+        return [claim]
+
+    chat_middleware = SpendGuardMiddleware(
+        client=client,
+        options=options,
+        unit=common_pb2.UnitRef(unit_id="usd_micros"),
+        pricing=common_pb2.PricingFreeze(pricing_version="prod-pricing-v1"),
+        claim_estimator=_claim_estimator,
+    )
+
+    agent = ChatAgent(
+        chat_client=OpenAIChatClient(...),
+        middleware=[chat_middleware],
+    )
+
+    async with run_context(RunContext(run_id="run-123")):
+        result = await agent.run("Hello!")
+        print(result)
+
+
+asyncio.run(main())
+```
+
+## 每次过闸的 chat-client 调用都发生了什么
+
+两种语言共用同一套生命周期:
+
+1. 中间件从当前 `RunContext` 加上渲染后消息 + options 的内容哈希,推导出一个
+   稳定的身份元组 `(decisionId, idempotencyKey, llmCallId, stepId)`。同一个
+   逻辑调用 → 同一个 idempotency key → sidecar 对重试做去重。
+2. 中间件对 sidecar UDS 发起 `RequestDecision(LLM_CALL_PRE)`。返回
+   `CONTINUE` / `DEGRADE` 时调用继续;返回 `STOP` / `STOP_RUN_PROJECTION` /
+   未知 decision 时中间件抛异常(.NET 上是
+   `SpendGuardDecisionDeniedException`,Python 上是 `DecisionDenied`);
+   返回 `REQUIRE_APPROVAL` 时抛一个 pending-approval 错误。
+3. **强制执行 review-standards §3.1 + §5:** 中间件一旦抛异常,内层
+   `IChatClient` / `call_next()` 的 HTTP **绝不会发出**。底座的 `--mock`
+   demo 会显式断言这条不变式。
+4. 内层调用抛异常时,中间件会在重新抛出之前先释放预留,这样预算不会被一次
+   失败的调用占住。
+5. 内层调用返回后,中间件带着提供商上报的用量发一个 `LLM_CALL_POST` trace
+   事件(.NET 取 `ChatResponse.Usage`,Python 取
+   `ChatResponse.usage_details`)。正是这个 `LLM_CALL_POST` 事件给这次调用
+   闭合了审计链。
+
+## 配置
+
+按 review-standards §2.3 P2,`.NET` 和 Python 的 options 接口是大小写互译的
+镜像:
+
+| .NET (`SpendGuardOptions`) | Python (`SpendGuardAgentFrameworkOptions`) | 必填 | 默认值 | 说明 |
+| -------------------------- | ------------------------------------------ | -------- | ------- | ----------- |
+| `TenantId` | `tenant_id` | YES | — | 这次调用计费到的 tenant UUID。 |
+| `BudgetId` | `budget_id` | YES | — | 投影出的 claim 的 `scope_id` 指向的 budget UUID。 |
+| `WindowInstanceId` | `window_instance_id` | YES | — | budget 上的时间窗 scope。 |
+| `SidecarSocketPath` | `sidecar_socket_path` | YES | `/var/run/spendguard/adapter.sock` (.NET) / `/var/run/spendguard/sidecar.sock` (Python) | 中间件连接的 UDS 路径。 |
+| `OnSidecarUnavailable` | `on_sidecar_unavailable` | NO | `Deny` / `"deny"` | 按 `design.md` ADR-005 默认 fail-closed。`Allow` / `"allow"` 是可选的 fail-open,会打一条 warning 日志。 |
+| `SdkVersion` | (由 SDK 设置) | NO | 与包版本一致 | 握手元数据。 |
+| `RuntimeKind` | (由 SDK 设置) | NO | `microsoft-agent-framework-dotnet` / `microsoft-agent-framework-python` | 在 sidecar 里路由能力协商。 |
+
+`claim_estimator` / `claimEstimate` 这个 callable 挂在中间件构造函数上
+(Python),或者挂在 `ITokenEstimator` DI 绑定上(.NET)。它把
+`ChatContext.messages` / `IEnumerable<ChatMessage>` 映射成一个
+`BudgetClaim`(Python)或 token 数(.NET)。v1 在 .NET 上自带一个
+`SimpleTokenEstimator`;Python 则要求调用方显式提供一个(`ADR-004`)。
+
+<h2 id="coexistence-with-agt">与 AGT 共存</h2>
+
+`design.md §1.3 + ADR-006` —— `spendguard.integrations.agt` 是 MAF
+**之上** 的策略引擎钩子,而这个 MAF 中间件是框架原生的 chat-client 钩子。两者
+可以叠加:
+
+- 一个 `AGT` 复合 evaluator 可以跑在 MAF 中间件 delegate 内部。
+- 两个接口共享同一个 `SpendGuardClient` 时,不管哪个集成接口负责本次调用,
+  每次 LLM 调用都只产生一次握手 + 一次预留。
+
+复合路径由 `DEMO_MODE=maf_python_with_agt` 做冒烟测试;各集成真正的承重 demo
+仍然是各自专门的那几个(AGT 用 `DEMO_MODE=agent_real_agt`,MAF 用
+`DEMO_MODE=maf_dotnet_real` / `DEMO_MODE=maf_python_real`)。
+
+## 限制
+
+- **逐 chunk 的流式过闸不在 v0.1.x 范围内。** `.NET` 的
+  `IAsyncEnumerable<ChatResponseUpdate>` 边界和 Python 流式
+  `ChatMiddleware` 重载都原样留给后续 slice。复合 demo 的第三步是 **ALLOW2**
+  (第二次非流式 ALLOW)而不是 STREAM —— 从承重矩阵的角度看,跟 D04 / D06 /
+  D08 的 STREAM 步形态一致;字节级的流式过闸是后续工作。
+- **工具级(function-call)过闸是可选项。** ADR-002 —— token 预算和工具成本
+  预算是可分离的。可选的第二个中间件(Python 上是
+  `SpendGuardToolMiddleware`;.NET 上规划了一个对应的
+  `SpendGuardFunctionInvocationMiddleware`)对单个 function 调用过闸。
+- **sidecar 依赖默认 fail-closed。** `OnSidecarUnavailable = Allow` /
+  `on_sidecar_unavailable="allow"` 是显式的可选项,每次请求不可达时都会打一条
+  warning 日志。Reviewer Sec3 会标记每一处使用点。
+- **不支持 .NET 7 / Framework 4.x。** 本 slice 唯一支持的 TFM 是 `net8.0`;
+  `netstandard2.1` 多目标构建推迟到 build host 升级后(写这段时,仓内 build
+  host 只带了 net8.0 的 reference packs)。
+
+## Demo
+
+两个承重 demo 模式(每种语言一个)外加一个复合冒烟:
+
+```bash
+# .NET 8 console app driving IChatClient.UseSpendGuard(sp)
+make demo-up DEMO_MODE=maf_dotnet_real
+
+# Python driving SpendGuardMiddleware.process(...)
+make demo-up DEMO_MODE=maf_python_real
+
+# composite smoke: MAF + AGT coexistence (optional)
+make demo-up DEMO_MODE=maf_python_with_agt
+```
+
+每个模式都启动同一套基础栈(`postgres + sidecar + ...`)外加一个计数桩
+提供商,然后让三次调用穿过 SpendGuard 包裹的边界:
+
+- **ALLOW** —— 预算内的小消息 → 上游 HTTP 发出 → 计数器 `+1`。
+- **DENY** —— `trigger-deny` 标记 → sidecar 契约 evaluator 发出
+  `SPENDGUARD_DENY` → 中间件在内层调用发出 **之前** 抛异常 → 计数器 `+0`。
+- **ALLOW2** —— 第二条小消息 → 上游 HTTP 发出 → 计数器 `+1`。替换掉
+  D04 / D06 / D08 的 STREAM 步(流式过闸是 v0.1.x 的 non-goal)。
+
+干净一轮跑出的成功行(LOCKED —— CI 会按这个精确拼写做 grep):
+
+```
+[demo] maf_dotnet ALL 3 steps PASS (ALLOW + DENY + ALLOW2)
+[demo] maf_python ALL 3 steps PASS (ALLOW + DENY + ALLOW2)
+```
+
+完整细节和 verify-SQL 闸门在
+[`deploy/demo/maf_dotnet/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/maf_dotnet/README.md)
+和
+[`deploy/demo/maf_python/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/maf_python/README.md)。
+
+独立的 `--mock` 模式(不需要 sidecar)针对同一批工厂、用进程内的
+`SpendGuardClient` 替身来跑:
+
+```bash
+# .NET
+dotnet run --project examples/maf-dotnet -- --mock
+
+# Python
+python examples/maf-python/run.py --mock
+```
+
+mock 模式会显式断言 **"DENY ⇒ 内层绝不被调用"** 这条不变式(INV-1.6),违反就
+非零退出。
+
+## 排障
+
+- **`SpendGuardDecisionDeniedException`(.NET) / `DecisionDenied`
+  (Python)。** 预算耗尽或某条契约规则发出 `SPENDGUARD_DENY` 时的预期行为。
+  中间件抛异常,内层 chat client 的 HTTP **绝不会发出**。去 sidecar 日志里查
+  匹配上的那条规则。
+
+- **预算闸门没拦住 —— LLM 调用照样发出。** 几乎都是因为中间件没被串进流水线。
+  检查 `UseSpendGuard(sp)` 返回的那个 `IChatClient`(.NET)—— 它 **必须** 被
+  传进 `ChatAgent` 构造函数 / 消费方代码,而不是被绕过。Python:确认
+  `SpendGuardMiddleware` 实例在 `ChatAgent(middleware=[ ... ])` 列表里。
+
+- **`SidecarUnavailableException` / `SidecarUnavailable`(握手超时)。**
+  sidecar 的 UDS 路径(`SidecarSocketPath` / `sidecar_socket_path`,默认
+  `/var/run/spendguard/adapter.sock`)不可达。检查 sidecar 容器是否起来、socket
+  文件是否存在、你的进程是否对它有读写权限。
+
+- **commit 时的 token 数和提供商上报的对不上。** .NET 中间件读
+  `ChatResponse.Usage.TotalTokenCount`;Python 读
+  `ChatResponse.usage_details["total_token_count"]`,并以
+  `input_token_count + output_token_count` 作为兜底。如果提供商的响应形态
+  非标准,就覆盖 `claim_estimator`(Python)或 `ITokenEstimator`(.NET)DI
+  绑定,让中间件用上你这套准确的计数。
+
+- **类身份检查失败:`err instanceof DecisionDenied`(Python)。**
+  重导出的 `DecisionDenied` 和 `spendguard.errors.DecisionDenied` 是同一个类
+  对象,所以无论你用哪个 import,这个检查都成立。如果检查失败,就怀疑你的
+  `site-packages` 树里有重复的 `spendguard` 包。
+
+## 相关
+
+- [Quickstart](../../quickstart/) —— 5 分钟拉起完整的 SpendGuard 栈。
+- [Microsoft AGT](../agt/) —— 上一层的策略引擎视角。
+- [OpenAI Agents SDK (Python)](../openai-agents/) —— OpenAI Agents SDK 的
+  Python 适配器。
+- [OpenAI Agents SDK (TypeScript)](../openai-agents-ts/) —— TS 同胞。
+- [Inngest AgentKit (TypeScript)](../inngest-agent-kit/) —— 给 `step.ai`
+  用的持久化 retry-dedup 适配器。
+- [Contract YAML reference](../../contracts/yaml/) —— 编写 allow/stop 规则。
+- 其他适配器集成:
+  [Pydantic-AI](../pydantic-ai/) ·
+  [LangChain & LangGraph (Python)](../langchain/) ·
+  [LangChain.js callback handler](../langchain-ts/) ·
+  [Vercel AI SDK (覆盖 Mastra)](../vercel-ai/) ·
+  [LiteLLM proxy guardrail](../litellm-proxy/)

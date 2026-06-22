@@ -1,0 +1,191 @@
+---
+title: "LangChain.js 回调处理器"
+description: >-
+  把 Agentic SpendGuard 作为 LangChain.js 的 BaseCallbackHandler 接入。任意
+  ChatModel 上 `callbacks: [handler]` 即插即用 —— 在上游提供商 HTTP 请求发出
+  之前做预调用预算预留(reservation),流结束时 commit 对齐真实 token 用量,全程带
+  签名审计链。
+---
+
+
+> LangChain.js(`@langchain/core@^0.3`)是 TS agent 生态里占主导地位的栈。SpendGuard
+> 以 `SpendGuardCallbackHandler` 形式发布 —— 一个标准的 `BaseCallbackHandler`,
+> 通过 `callbacks: [handler]` 挂到任意 `ChatOpenAI` / `ChatAnthropic` / `BaseChatModel`
+> 上即可。无需对 model 做子类化,也不用 fork proxy。同一个 handler 也覆盖 LangGraph,
+> 因为 LangGraph 本身就是构建在 `BaseChatModel` 之上的。
+
+## 安装
+
+```bash
+pnpm add @spendguard/sdk @spendguard/langchain @langchain/core @langchain/openai
+```
+
+`@spendguard/sdk` 和 `@langchain/core` 都声明为 peer dependency,所以这个适配器
+两边都不锁版本 —— 由你项目自己的 lockfile 说了算。要求 Node 20.10+(底层 substrate
+用到了 `await using` 和已稳定的 `AsyncLocalStorage`)。
+
+## 快速上手
+
+最小的端到端接线 —— 把一个 `SpendGuardClient` 连到 sidecar 的 UDS,交给
+`SpendGuardCallbackHandler`,再把这个 handler 挂进 `ChatOpenAI` 的 `callbacks:`
+数组:
+
+```ts
+import { ChatOpenAI } from "@langchain/openai";
+import { HumanMessage } from "@langchain/core/messages";
+import { SpendGuardClient } from "@spendguard/sdk";
+import { SpendGuardCallbackHandler } from "@spendguard/langchain";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "langchain-js",
+});
+await client.connect();
+await client.handshake();
+
+const handler = new SpendGuardCallbackHandler({
+  client,
+  budgetId: "44444444-4444-4444-8444-444444444444",
+});
+
+const model = new ChatOpenAI({
+  model: "gpt-4o-mini",
+  callbacks: [handler],
+});
+
+try {
+  const res = await model.invoke([new HumanMessage("hello langchain")]);
+  console.log(res.content);
+} finally {
+  await client.close();
+}
+```
+
+每次 `model.invoke()` 背后发生的事:
+
+1. LangChain 的 `RunManager` 在 OpenAI 的 HTTP 调用**之前**触发 `handleChatModelStart`。
+   handler 从 `(tenantId, runId, parentRunId)` 推导出规范的幂等键,并以
+   `trigger="LLM_CALL_PRE"` 调用 `client.reserve(...)`。
+2. 一旦命中 `DecisionDenied`(DENY / STOP / APPROVAL_REQUIRED),handler 直接 **throw**
+   —— `raiseError = true` 已经接好,所以这个 throw 会经由 `CallbackManager` 一路冒上去,
+   在提供商 HTTP 调用**之前**就把 `model.invoke()` 拦停。
+3. 成功的话,在途的 `(decisionId, reservationId)` 会以 LangChain 的 `runId` 为键暂存起来,
+   然后 OpenAI 的 HTTP 调用才发出。
+4. `handleLLMEnd` 消费掉这条在途记录,取出提供商上报的 `tokenUsage`,通过
+   `client.commitEstimated(...)` 发出一条 `SUCCESS` commit。`handleLLMError` 对称地
+   发出一条 `PROVIDER_ERROR` commit,并把错误信息串到 `actualErrorMessage` 上。
+
+## 配置
+
+handler 的配置项已经支持 `unitId` 透传(在 runner 环境里设 `SPENDGUARD_UNIT_ID`,
+然后作为 `unitId` 选项传进来)。设计上预留的更丰富的 `windowInstanceId` / pricing /
+`claimEstimator` 等字段,留到后续 slice 再做。
+
+<table>
+  <thead>
+    <tr><th>选项</th><th>类型</th><th>是否必填</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>client</code></td><td><code>SpendGuardClient</code></td><td>YES</td><td>来自 <code>@spendguard/sdk</code> 的已配置 substrate 客户端。适配器**不**接管 client 的生命周期 —— 由调用方自己负责 <code>connect()</code> / <code>handshake()</code> / <code>close()</code>。</td></tr>
+    <tr><td><code>tenantId</code></td><td><code>string</code></td><td>NO</td><td>覆盖 tenant UUID。不填时,默认沿用构造 <code>client</code> 时配置的那个 tenant。</td></tr>
+    <tr><td><code>budgetId</code></td><td><code>string</code></td><td>NO</td><td>作为预估 claim 的 <code>scopeId</code> 使用的 budget UUID。不填时,handler 退回到用 <code>tenantId</code> 当 scopeId。</td></tr>
+  </tbody>
+</table>
+
+后续某个 minor 版本(`v0.x`)会把这组配置项逐字段对齐到 Python 的
+`SpendGuardChatModel` 构造器(`windowInstanceId`、`unit`、`pricing`、
+`claimEstimator`、`route`、`callSignatureFn`、`claimEstimate`、
+`onApprovalRequired`)。这些扩展都是新增的可选字段 —— 对 v0.1.0 的形态不构成
+破坏性改动。
+
+## 限制
+
+**SpendGuard 的 LangChain.js 适配器只做基于回调的预调用 + 流结束时 commit。**
+handler 在上游提供商 HTTP 调用**之前**做闸门,在流跑完**之后**做 commit。
+在你把它放到长流式响应前面、或者打算依赖 D04/5 完整设计能力之前,有几件重要的事得先搞清楚:
+
+- **基于回调的架构,而非 model 子类。** LangChain.js 偏好回调处理器;SpendGuard 发布的是
+  `BaseCallbackHandler`,而不是对 `BaseChatModel` 做子类包装。throw 即拦停的机制依赖
+  `raiseError = true` 和 `awaitHandlers = true` —— 这两个都固定钉在 handler 实例上。
+  如果你在下游把它们改掉,预算闸门就失效了。
+- **`raiseError = true` 的冒泡至关重要。** 没有它,`CallbackManager` 会把
+  `handleChatModelStart` 抛出的 throw 吞掉,预算闸门就永远拦不住那个 LLM 调用。适配器
+  显式把它钉死,正是为了防住未来 `@langchain/core` 的行为漂移;不要在 handler 实例上覆盖它。
+- **流式响应没有流中途的 cap。** SpendGuard 在预调用时预留的是预测出来的预算。commit 发生在
+  流结束、对着真实 `tokenUsage` 做。handler 不会去拆掉一条正在跑的流来阻止 token 继续吐出
+  —— 超额会落进审计链、在 commit 时体现出来,但 token 此时已经吐出去了。
+- **DEGRADE 的 patch 应用会以 `MutationApplyFailed` 形式暴露出来。** 与 Python
+  `spendguard-sdk[langchain]` v0.5.1 的立场一致。内建的 claim mutation 留到后续 slice 再做。
+- **没有工具调用的循环中途闸门。** 每次工具调用都是独立的 LangChain 事件;substrate 按调用
+  逐个处理 PRE/POST。跨工具的预算强制是 contract 层的活,不是适配器的活。
+
+## Demo
+
+随附的一个 docker-compose demo,会对着真实的 `ChatOpenAI` + sidecar + 计数桩(counting-stub)
+提供商,端到端跑通完整的 ALLOW + DENY + STREAM 矩阵:
+
+```bash
+make demo-up DEMO_MODE=langchain_ts
+```
+
+这个 mode 会拉起 `postgres + sidecar + langchain-runner + counting-stub`,然后从
+[`examples/langchain-ts/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/langchain-ts/)
+里的 Node 示例跑三次 invoke:
+
+- **ALLOW** —— 预算内的小消息。`handleChatModelStart` 触发 PRE,`client.reserve()`
+  返回 ALLOW,`ChatOpenAI` 的 HTTP 调用发出,计数器 +1,`handleLLMEnd` 带着真实 token
+  用量发出一条 `SUCCESS` commit。
+- **DENY** —— `spendguard_estimate_override=2000000000` 把预先种好的 1B 硬上限直接顶爆。
+  sidecar 的 contract evaluator 发出 `SPENDGUARD_DENY`,`client.reserve()` 抛出
+  `DecisionDenied`,`model.invoke()` 在 OpenAI 的 HTTP 调用**之前**就拦停。counting-stub
+  计数器**不变**(证明闸门是在预调用时就生效了)。
+- **STREAM** —— `streaming: true` 走 SSE 分块路径。PRE 在流打开时触发一次,POST 在流结束时
+  对着真实的 `usage.completion_tokens` commit 一次。
+
+干净跑通时的成功行:
+
+```
+[demo] langchain_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+完整细节和 verify-SQL 闸门在
+[`deploy/demo/langchain_ts/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/langchain_ts/README.md)。
+
+## 排障
+
+常见的启动期和首次调用错误。substrate 的类型化异常已经从 `@spendguard/langchain`
+重新导出,所以你可以直接对 `DecisionDenied` / `SidecarUnavailable` 做模式匹配,无需再多引一个 import。
+
+- **`DecisionDenied: reserve() denied by contract`** —— 这是预算耗尽、或某条 contract
+  规则发出了 `SPENDGUARD_DENY` 时的预期行为。handler 把它重新抛出,`model.invoke()` 拦停,
+  OpenAI 的 HTTP 调用根本不会发出。去 sidecar 日志里查是哪条规则命中的;ledger 里那行 decision
+  记录会带着 `decision_context.contract_rule`。
+
+- **预算闸门没拦住 —— 提供商调用照样发出去了。** 几乎都是因为调用路径上某处出现了
+  `raiseError = false`(在 handler 实例上被覆盖,或者外层包了一个把它剥掉的 `CallbackManager`)。
+  适配器在构造时把 `raiseError = true` 和 `awaitHandlers = true` 钉死;两个都别去覆盖。
+  复现办法是设 `LANGCHAIN_VERBOSE=true` —— `CallbackManager` 会把被吞掉的那个 throw 打到日志里。
+
+- **`SidecarUnavailable: handshake timeout`** —— sidecar 的 UDS 路径
+  (`SPENDGUARD_SIDECAR_UDS`,默认 `/var/run/spendguard/adapter.sock`)连不上。检查 sidecar
+  容器是不是起来了、socket 文件在不在、你的 Node 进程对它有没有读写权限。在 demo overlay 里这条线
+  由 `deploy/demo/langchain_ts/docker-compose.yaml` 接好;在 demo 之外,把同样的 socket 路径
+  挂进你 Node 容器的 `/var/run/spendguard/` 里。
+
+- **`handleLLMEnd: no inflight entry for runId=...`** —— 适配器在看到某个 `runId` 的 POST
+  commit、却找不到对应在途预留时,会打一条 warn 然后直接返回。在降级场景下(PRE 阶段碰到
+  `SidecarUnavailable`,适配器放行了这次没带闸门的 LLM 调用)这是良性的。如果它出现时前面没有
+  伴随的 `SidecarUnavailable`,那就要怀疑是框架重复投递了 `handleLLMEnd` —— substrate
+  进程内的 `DecisionCache` 会在 commit 时把这条重复折叠掉。
+
+- **`TypeError: client.reserve is not a function`** —— 你引的 `@spendguard/langchain`
+  对着一个早于 `reserve()` 重命名的 `@spendguard/sdk` 版本。v0.1.0 适配器要求
+  `@spendguard/sdk@^0.1.0`。用 `pnpm add @spendguard/sdk@latest` 升级。
+
+## 相关
+
+- [快速上手](../../quickstart/) —— 5 分钟拉起完整的 SpendGuard 栈
+- [LangChain & LangGraph(Python)](../langchain/) —— 本适配器的 Python 同胞
+- [Contract YAML 参考](../../contracts/yaml/) —— 编写 allow/stop 规则
+- 其他适配器集成:[Pydantic-AI](../pydantic-ai/) · [OpenAI Agents SDK](../openai-agents/) · [Microsoft AGT](../agt/) · [LiteLLM proxy guardrail](../litellm-proxy/)

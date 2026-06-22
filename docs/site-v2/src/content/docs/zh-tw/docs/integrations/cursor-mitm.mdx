@@ -1,0 +1,173 @@
+---
+title: "Cursor IDE MITM codec — EXPERIMENTAL,僅限 SOW"
+description: >-
+  逆向工程出來的 Connect-RPC codec,讓 SpendGuard 能在 Cursor IDE Agent
+  session 上插入 budget reservation。EXPERIMENTAL,只開放給簽了維護
+  addendum 的 Enterprise SOW 客戶。Cursor 一改 wire protocol,這個 codec
+  就會壞。客戶自行承擔斷線風險。DO NOT SHIP IN GA CONFIG。
+sidebar:
+  badge:
+    text: Experimental
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="EXPERIMENTAL — 僅限 SOW">
+  **DO NOT SHIP AS A GA FEATURE。** 這個整合只開放給簽了維護 addendum 的
+  Enterprise SOW 客戶。Cursor 一改 wire protocol,codec 就會壞。客戶把
+  斷線風險當成 SOW 的一部分自行承擔。完整的法律立場請看 repo 裡的
+  [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/SOW.md)。
+</Aside>
+
+> **法律立場。** 這個 codec 做的是
+> **逆向工程出來的互通性(reverse-engineered interoperability)**。
+> [`PROTOCOL.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/PROTOCOL.md)
+> 裡記錄的 wire format 是從 Cursor binary 外面觀察出來的,沒有夾帶任何
+> 供應商的原始程式碼。啟用這個 codec 的 SpendGuard 客戶,是在 Enterprise
+> SOW 之下這麼做的,而該 SOW 明確認知到:(a) Cursor 一改 wire protocol,
+> codec 就可能壞;(b) 客戶自己要負責確認他們自己的 Cursor 服務條款,允許
+> 在主機端對 outbound 流量做 MITM。
+
+## 為什麼 Cursor IDE 需要一個客製 adapter
+
+Cursor IDE 的 Agent 介面**不會**去呼叫 `api.openai.com` /
+`api.anthropic.com`。它走私有的 Connect-RPC 去呼叫 `api.cursor.sh`,
+裡面包的是 Cursor 自家的 message envelope。SpendGuard 那幾個標準 adapter
+(model middleware、base-URL swap、OpenAI 相容的 egress proxy)都看不到
+訊息內容 — 因為 wire bytes 是 Cursor 內部的 protobuf,不是 OpenAI JSON。
+
+那些在全體員工規模部署 Cursor、又想在 Cursor session 上套 SpendGuard
+budget gating 的 SOW 客戶,願意拿斷線風險去換完整的 session 覆蓋。
+
+## codec 到底做了什麼
+
+```
+Cursor IDE ──TLS→ SpendGuard egress proxy (D02 leaf w/ api.cursor.sh SAN)
+                       │
+                       ├─ if Host == api.cursor.sh AND feature `cursor-mitm-experimental`
+                       │     │
+                       │     ▼
+                       │  services/cursor_codec
+                       │     ├─ framing::ConnectRpcReader  → DecodedFrame
+                       │     ├─ envelope::CursorRequest::decode → ChatRequest
+                       │     ├─ translator::to_openai → CanonicalRequest
+                       │     │    └→ ledger::reserve → reservation_id
+                       │     ├─ upstream HTTPS to api.cursor.sh (re-encoded forward)
+                       │     ├─ envelope::CursorResponseStream::decode (server-streaming)
+                       │     ├─ translator::to_openai_chunks → CanonicalResponseChunks
+                       │     │    └→ ledger::commit_estimated / release
+                       │     └─ framing::ConnectRpcWriter → original Cursor wire
+                       │
+                       └─ else: D02 default pass-through (no codec)
+```
+
+這個 codec 是掛在 workspace feature flag `cursor-mitm-experimental`
+底下出貨的。預設 build 根本不會編進這個 codec crate;要用的話,必須在
+egress-proxy 跟 CLI consumer 這兩層明確地把 feature 打開。
+
+## 三個很大聲的「EXPERIMENTAL」標記
+
+依照
+[`design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D17_cursor_mitm/design.md)
+§6,這個 codec 任何時候都帶著三個很大聲的標記。只要哪個 diff 把其中任何
+一個拿掉,reviewer 一律打回。
+
+1. **Cargo manifest:**
+   [`services/cursor_codec/Cargo.toml`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/Cargo.toml)
+   帶著 `[package.metadata.experimental]`,裡面 `reason` 字串就是這一句
+   `Reverse-engineered Cursor wire protocol. Breaks on
+   vendor release.`
+2. **Stderr banner:** 每一個 codec 的 public entry point 都會呼叫
+   `assert_experimental_banner_emitted()`,每個 process 第一次用到時就
+   會往 stderr 印出:
+   ```
+   [EXPERIMENTAL] cursor-mitm codec active. Codec break SLA:
+   docs/customer/sow-cursor-mitm.md. DO NOT SHIP IN GA CONFIG.
+   ```
+3. **SOW addendum 文件:**
+   [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/SOW.md)
+   在最上面就掛著 `Status: EXPERIMENTAL — SOW only`,front-matter 裡
+   有 `noindex: true`,而且把 `DO NOT SHIP AS A GA FEATURE` 這句字面警告
+   放成最上層的 callout。
+
+## 斷線視窗 SLA(Break-Window SLA)
+
+SOW addendum 會把這幾欄填起來:
+
+| 欄位 | 客戶端的值 |
+|-------|---------------------|
+| codec 斷線偵測視窗 | 通常在 Cursor release 後 ≤24 小時內 |
+| codec 修復周轉時間目標 | 通常 ≤5 個工作天 |
+| 客戶端問題升級聯絡窗口 | on-call channel |
+| SpendGuard 問題升級聯絡窗口 | SpendGuard customer-success on-call |
+| 測過的 Cursor client 版本範圍 | 交付當下 Cursor IDE 的 min/max 版本 |
+
+codec 一旦斷線,SpendGuard 會重新擷取最新的 Cursor wire bytes(依客戶
+自己的主機端擷取流程),刷新 proto description 加上 fixture 語料庫,然後
+重新發布一個掛 feature-flag 的 build。客戶則在他們自己的變更管理視窗內
+重新部署。
+
+## Sealed-secret 憑證模型
+
+客戶的 Cursor session bearer token 對 codec 來說是 end-to-end 不透明的。
+它們會原封不動地從 Cursor IDE binary 流到 `api.cursor.sh`;codec **不會**
+去解密、記錄或保存它們。稽核鏈會依照 POST_GA_03 的 tenant 遮蔽政策,把
+`model` / `max_tokens` / `temperature` 以外的 message-body 欄位全部
+redact 掉。
+
+這個 codec **不會**引入任何新的長期 secret。只要 SOW 部署時把 leaf cert
+的 SAN 延伸出去,D02 的 trust store 就涵蓋得到 `api.cursor.sh`。
+
+## 維運者的威脅模型
+
+這個 codec 是 **best-effort gating**,不是一道硬性的政策 gate。當 codec
+看不懂 wire shape 的時候(因為 Cursor 把它改掉了),egress proxy 會
+**把先前保留住的 reservation 釋放掉,讓這通呼叫直接放行過去**。codec 碰到
+看不懂的 Cursor model 字串時,也是同一套處理方式。失敗會很大聲(decode-error metric
+加上 stderr banner 加上結構化 log),但**不會**擋住客戶的 Cursor session。
+
+完整的威脅模型表在
+[`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/SOW.md)
+§4。
+
+## Demo
+
+有一個以 fixture 為基礎的 demo,拿四份合成的 `.cursor-rpc` fixture
+(multi-turn / tool calls / error response / long stream)來端到端證明
+codec 的正確性。這個 demo **不會**去開 Cursor IDE binary,也**不會**碰到
+`api.cursor.sh`:
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=cursor_mitm_fixture
+```
+
+這個 demo 的
+[`README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/cursor_mitm_fixture/README.md)
+記錄了整條分層的 pipeline(framing decode → envelope decode →
+translation → mock sidecar reserve+commit → byte-for-byte 保留 →
+counting-stub POST),以及它跟一個假想的「開 Cursor binary」demo 有哪些
+不一樣。
+
+客戶自己的部署,則是拿同一份 codec 去對真實的 Cursor 流量跑,搭配他們自己
+驗證過的擷取路徑。這個 demo 證明的是 codec 在隔離環境下的正確性。
+
+## 限制
+
+- **真實的 Cursor 流量不進 CI。** 只用錄好的 fixture。真實擷取的證據放在
+  SOW 客戶端的 artifact 裡。
+- **不涵蓋 Cursor 的非 Agent 介面。** Tab 自動補全跟 Cmd-K 的 inline 編輯
+  都不在範圍內;只有 Agent 介面會被 gate。
+- **是 best-effort gating,不是硬性 fail-closed。** 看不懂的 wire shape
+  會 release 並放行過去;codec 對這件事很大聲,但它不會擋住客戶的
+  Cursor session。
+- **版本鎖定(Version pin)。** 每一份 fixture 都標了一個 Cursor client
+  版本範圍。拿來 replay 一個落在測試視窗外的 live Cursor 版本,會回 503
+  並帶上 `X-SpendGuard-Codec-Break` header。
+- **Windsurf 的 codec 是另一個獨立的 D18** — 不在 D17 範圍內。
+
+## 相關連結
+
+- [Quickstart](../../quickstart/) — 5 分鐘把整套 SpendGuard stack 拉起來
+- [Contract YAML 參考](../../contracts/yaml/) — 撰寫 allow/stop 規則
+- 其他 adapter 整合:[Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [Kong AI Gateway](../kong-ai-gateway/) · [Dify](../dify/) · [LiteLLM SDK shim](../litellm-sdk-shim/)

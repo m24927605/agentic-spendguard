@@ -1,0 +1,204 @@
+---
+title: "Devin 账单导入器(Cognition Labs —— 仅对账)"
+description: >-
+  针对 Devin Team API 用量的事后导入器。SpendGuard 无法管控 Devin 的花费 ——
+  Devin 的 agent 循环完全跑在 Cognition 的云端 VM 里。导入器拉取 ACU 消耗,
+  借助内置价格表换算成估算的美元金额,再发出带
+  reservation_source=subscription_meter / import_source=devin_team_api
+  标签的签名审计事件。
+sidebar:
+  badge:
+    text: Reconciliation only
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="SpendGuard 无法管控 Devin 花费 —— 只有 Cognition 能">
+  Devin(Cognition Labs)的 agent 循环跑在 Cognition 的云端 VM 里。
+  客户网络从头到尾都不承载任何 per-LLM-call 的 payload;egress proxy 加上 SDK
+  adapter 一个字节都拦不到。Devin 导入器**只做对账** —— 它事后拉取用量,
+  让看板上 CIO/CFO 那套 single-pane-of-glass 视图不至于失真,但它**不会**
+  对 Devin 会话做任何 gate、限流或短路。这块责任在 Cognition 手里。架构层面的推理见
+  [framework-coverage 策略备忘录 Archetype IV](https://github.com/m24927605/agentic-spendguard/blob/main/docs/strategy/framework-coverage-2026-06.md)。
+</Aside>
+
+## 这是什么
+
+`spendguard-importer-devin` crate(D14)是一个 Rust 二进制 + 库,它会:
+
+1. 从 [Devin Team
+   API](https://docs.devin.ai/api-reference/team-usage)(`/api/v1/teams/{id}/usage`)拉取用量
+   —— 用 `live` feature 门控,所以默认构建是不带 HTTP 的。
+2. 借助 `services/importer_devin/assets/devin_acu_prices.json`
+   里的内置价格表,把 **ACU(Agent Compute Unit,≈ $2.25/ACU)** 换算成估算的美元金额。
+3. 发出签名的 `spendguard.audit.import.devin_acu` CloudEvent,
+   带上 `reservation_source=subscription_meter` 和
+   `import_source=devin_team_api` 标签 —— 落到的看板视图跟
+   D13 subscription-meter 的行同属一处。
+
+默认的合并门是**净化后的 fixture 回放** —— 即提交进库的
+`tests/fixtures/devin_usage.json` 快照。live 模式需要 operator 主动开启。
+
+## ACU → $ 换算
+
+| 套餐 | `usd_per_acu` | 审计行形态 |
+|------|--------------|-----------------|
+| **team** | $2.25/ACU(Cognition 公开费率,2026-06) | `amount_micro_usd > 0`,`reason_code = NULL` |
+| **enterprise** | _按合同单独谈定_ | `amount_micro_usd = NULL`,`reason_code = "devin_enterprise_negotiated_rate"` |
+
+换算是纯函数:`round(acu_consumed × usd_per_acu × 1_000_000)`,
+单位是 micro-USD,溢出时饱和到 `i64::MAX`。换算那一刻会把价格表的
+`pricing_version` 戳到每一条发出的行上 —— 之后回改费率文件**不会**重写
+历史审计行。
+
+### Enterprise NULL 费率注意事项
+
+Enterprise 套餐的 ACU 费率是在 NDA 下单独谈的。SpendGuard 没法去猜这个美元金额
+—— 所以导入器发出 `amount_micro_usd = NULL`,并戳上
+`reason_code = "devin_enterprise_negotiated_rate"`。看板必须把**"费率未知"**
+和**"零花费"**区分开 —— 这一行的 ACU 字段照样有值,所以即便美元映射是保密的,
+operator 仍然看得到 Devin 的消耗量。
+
+## 安装
+
+### Fixture 模式(默认合并门)
+
+```bash
+cargo run -p spendguard-importer-devin --bin importer_devin -- \
+    --mode fixture \
+    --fixture services/importer_devin/tests/fixtures/devin_usage.json \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+二进制会把每条记录作为一个 CloudEvent 打到 stdout;demo runner 脚本
+(`deploy/demo/import_devin_fixture_demo.sh`)负责把 INSERT 路径接到 demo postgres 上。
+
+### Live 模式(operator 主动开启)
+
+```bash
+export DEVIN_API_TOKEN=<Team Admin API token>
+export DEVIN_API_BASE_URL=https://api.devin.ai/api/v1   # optional override
+
+cargo run -p spendguard-importer-devin --features live --bin importer_devin -- \
+    --mode live \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+`live` feature 只拉带 `rustls-tls` 的 `reqwest`(不带 `native-tls`,
+不带 `openssl-sys`),并用 30s 的 per-request 超时,外加有上限的指数退避
+(上限:1 小时)来扛住限流。
+
+token 的权限要收窄到**仅 Devin Team Admin API** 这一个 scope —— 最小权限原则。
+
+## 幂等性
+
+对同一个窗口重跑不会重复发事件。CloudEvent 的 `event.id` 是从
+`(devin_team_id, devin_session_id, window_end)` 推导出来的确定性 UUIDv5;
+canonical_ingest 走现有的 `event_replay_dedup` 表做去重。
+
+这个 demo 想重跑多少次都行:
+
+```bash
+make -C deploy/demo demo-verify-import-devin-fixture
+make -C deploy/demo demo-verify-import-devin-fixture   # idempotent; 0 new rows
+```
+
+## CloudEvent 示例
+
+<div is:raw>
+
+```json
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.devin_acu",
+  "source": "spendguard-importer-devin",
+  "id": "018f4a3a-d971-7c14-91fe-d014de71aca0",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/demo/devin/team/TEAM_FIXTURE_001/session/SESSION_FIXTURE_001",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "demo",
+    "budget_id": "devin-budget",
+    "devin_team_id": "TEAM_FIXTURE_001",
+    "devin_session_id": "SESSION_FIXTURE_001",
+    "acu_consumed": 12.5,
+    "usd_per_acu": 2.25,
+    "amount_micro_usd": 28125000,
+    "pricing_version": "devin-acu-v1-2026-06",
+    "window_start": "2026-06-01T00:00:00Z",
+    "window_end": "2026-06-01T01:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "devin_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "aa4c172164a8a6a5d4e97c6bde4ac455e01f5f37932b8a3561ef213049144807"
+  }
+}
+```
+
+</div>
+
+完整的 schema 文档见
+[`docs/specs/coverage/D14_devin_importer/cloudevent-schema.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D14_devin_importer/cloudevent-schema.md)。
+
+## 价格表示例
+
+<div is:raw>
+
+```json
+{
+  "pricing_version": "devin-acu-v1-2026-06",
+  "effective_from": "2026-06-01T00:00:00Z",
+  "currency": "USD",
+  "rates": [
+    { "plan": "team",       "usd_per_acu": 2.25 },
+    { "plan": "enterprise", "usd_per_acu": null }
+  ]
+}
+```
+
+</div>
+
+## 为什么我们没法 gate
+
+Devin 的 agent 循环**完全跑在 Cognition 的云端 VM 里**。
+客户的 egress proxy 根本看不到 LLM API call 的 payload ——
+Cognition 的 VM 是从他们自己的网络边界内部去拨 OpenAI / Anthropic 的。
+Team API 暴露出来的只有事后的 ACU 消耗,而不是一个 pre-call hook。
+
+这就是 SpendGuard framework-coverage 分析里的 **Archetype IV**:
+一个完全托管的云端 agent,客户对其网络零可见性。唯一可行的集成方式就是对账
+—— 事后把账单拉过来,在看板上呈现出来,在跨越阈值时告警。除非 Cognition
+出一个 pre-call webhook,否则 gate 在架构上根本做不到。
+
+## 你在看板上能看到什么
+
+* 每个会话、每个团队的估算美元金额 —— 标注了 `pricing_version`。
+* ACU 消耗量(始终存在,enterprise NULL 费率的行也有)。
+* `reservation_source = subscription_meter` 过滤器把 Devin 花费跟
+  Claude Code Pro / ChatGPT 上的 Codex 归到一组(这些都是绕过 BYOK ledger 的 advisory 行)。
+* 按套餐维度做透视:`team` vs `enterprise`。
+
+## 实现入口
+
+* Crate 脚手架 + Cargo.toml:`services/importer_devin/Cargo.toml`
+  —— workspace-excluded、`publish = false`、`live` feature 门控。
+* 纯换算:`services/importer_devin/src/import_record.rs`
+  (`import_record_to_audit_row`)—— 无 I/O,不读时钟。
+* 价格表:`services/importer_devin/src/acu_price_table.rs` ——
+  饱和算术,拒绝 NaN/Infinity/负数输入。
+* CloudEvent 构造器:`services/importer_devin/src/cloudevent_envelope.rs`
+  —— 通过 `tests/golden/cloudevent_v1alpha1_*.json` 做 golden 测试。
+* Fixture loader:`services/importer_devin/src/fixture_loader.rs` ——
+  在 parse 时硬拒非合成 ID(T5)。
+* Live client:`services/importer_devin/src/live/client.rs` ——
+  rustls-only 的 `reqwest` 封装,带类型化的 401/403/429/5xx 错误。
+* Migration:`services/ledger/migrations/0059_import_source_widen.sql` ——
+  把现有 `audit_outbox.import_source` 的 CHECK 放宽到包含
+  `devin_team_api`。
+
+完整的设计推理 + slice 级拆解,见
+[`docs/specs/coverage/D14_devin_importer/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D14_devin_importer/design.md)。

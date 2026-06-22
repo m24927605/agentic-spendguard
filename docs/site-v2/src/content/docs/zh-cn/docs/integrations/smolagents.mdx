@@ -1,0 +1,223 @@
+---
+title: "用 SpendGuard 给 SmolAgents 做预算管控"
+description: >-
+  为 HuggingFace SmolAgents 提供调用前的 token 预算管控,基于
+  Agentic SpendGuard。一个 wrapper 类继承唯一的
+  smolagents.Model ABC,即可覆盖 InferenceClientModel、OpenAIServerModel
+  (vLLM / Ollama / Together / Groq) 和 TransformersModel——一个 wrapper 实例
+  统一管控,行为完全一致。
+---
+
+> 你的 SmolAgents `CodeAgent` 跑 `agent.run("...")` 会经过很多次工具调用步骤,
+> 但在账单到手之前,你根本看不出是哪一步把预算打爆了。SpendGuard 继承
+> `smolagents.Model` ABC,包住内层的 Model,这样每次 `generate()` 调用都会在
+> 上游 HTTP 发出**之前**先向预算做预留(reserve)。一个类就覆盖了所有兼容
+> SmolAgents Model 接口的厂商后端——你只需要换内层的构造函数。
+
+## 为什么你会想要它
+
+- **一个 wrapper,所有后端通吃。** SmolAgents 的 `Model` ABC 位于厂商 SDK
+  边界**之上**。`InferenceClientModel`(HF Inference API)、
+  `OpenAIServerModel`(vLLM / Ollama / Together / Groq /
+  OpenAI 兼容)以及 `TransformersModel`(进程内的 HuggingFace
+  transformers)都由同一个 `SpendGuardSmolModel`
+  实例统一管控、行为一致,因为管控点就落在 ABC 这一层。
+- **调用前拒绝,而不是事后算账。** DENY 会直接从 `generate()`
+  里抛出 `DecisionDenied`。`MultiStepAgent.step`
+  在 model 这条路径上没有框架侧的 catch(已对 smolagents 1.26 核实),
+  所以这个异常能干净地传到 `CodeAgent.run` 的调用方——上游 model 的 HTTP
+  **永远不会**发出。
+- **`<1.5` 和 `>=1.5` 两代 agent 都能用。** 老版本 SmolAgents agent
+  调用的是 `model(messages, ...)`;当前版本调用的是
+  `model.generate(...)`。wrapper 同时定义了这两条入口,`__call__`
+  委托给 `generate`,这样安装时的版本漂移就不会悄悄绕过管控点。
+- **审计 + 审批流水线与其他所有框架共享。**
+  wrapper 写入的是同一套 SpendGuard ledger,跟 LangChain、
+  Pydantic-AI、OpenAI Agents、Google ADK、AWS Strands、DSPy、Agno、
+  BeeAI 和 AutoGen 这些集成是同一份。共享的 `spendguard_run_context`
+  contextvar(复用自 `spendguard.integrations.openai_agents`)
+  意味着:一个外层的 OpenAI Agents run 包住一个 SmolAgents `CodeAgent` 时,
+  会复用同一个 `run_id`。
+
+## 两条路径——选对一条
+
+| 内层 Model 是 | 安装 | 集成方式 |
+|------------------------|---------|-------------|
+| `InferenceClientModel`(HF Inference API) | `pip install 'spendguard-sdk[smolagents]'` | `SpendGuardSmolModel(inner=InferenceClientModel(...))`——直接包 |
+| `OpenAIServerModel`(vLLM / Ollama / Together / Groq / OpenAI 兼容) | (同上) | `SpendGuardSmolModel(inner=OpenAIServerModel(...))`——直接包 |
+| `TransformersModel`(进程内 HF transformers) | (同上) | `SpendGuardSmolModel(inner=TransformersModel(...))`——直接包;**仅按 token 计数**(本版本不做 GPU-second 计费) |
+| `LiteLLMModel` | `pip install spendguard-litellm-shim` | **不要包**——改用 [LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/)。wrapper 在构造时就会**拒绝**这种组合,防止重复管控。 |
+| `step_callbacks=[...]` 遥测镜像 | (同 wrapper) | `spendguard_step_callback(client, run_id=...)`——**仅供观测,不做管控** |
+
+## 配置(60 秒搞定)
+
+```bash
+pip install 'spendguard-sdk[smolagents]'
+```
+
+这个 extra 会解析出 `smolagents>=1.5,<2`。厂商后端
+(`huggingface_hub`、`openai`、`transformers`)**不**做版本钉死——SmolAgents
+自己把它们声明为对应的 sub-extra,内层 Model 类由你自己挑。
+
+```python
+from smolagents import CodeAgent, OpenAIServerModel
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.smolagents import (
+    SpendGuardSmolModel, spendguard_step_callback,
+    RunContext, run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+client = SpendGuardClient(socket_path="/var/run/spendguard/sidecar.sock",
+                          tenant_id="...")
+await client.connect()
+await client.handshake()
+
+unit = common_pb2.UnitRef(unit_id="usd_micros",
+                          token_kind="output_token",
+                          model_family="gpt-4")
+pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+guarded = SpendGuardSmolModel(
+    inner=OpenAIServerModel(model_id="gpt-4o-mini",
+                            api_base="https://api.openai.com/v1",
+                            api_key="..."),
+    client=client,
+    budget_id="...",
+    window_instance_id="...",
+    unit=unit,
+    pricing=pricing,
+    claim_estimator=lambda messages: [common_pb2.BudgetClaim(...)],
+)
+
+agent = CodeAgent(
+    model=guarded,
+    tools=[],
+    step_callbacks=[spendguard_step_callback(client, run_id="my-run-1")],
+)
+
+# CodeAgent.run is SYNC (smolagents Model.generate is sync). The
+# run_context contextmanager is async — pre-bind the contextvar via an
+# outer async scope so the sync agent inherits the run_id:
+async with run_context(RunContext(run_id="my-run-1")):
+    # Drive the agent inside a thread executor so the wrapper's
+    # asyncio.run does not collide with this outer loop:
+    import asyncio, contextvars
+    ctx = contextvars.copy_context()
+    result = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: ctx.run(agent.run, "Say hello in three words."),
+    )
+```
+
+就这样。现在每一次 `model.generate(...)` 调用都会:
+
+1. 通过 `RequestDecision(LLM_CALL_PRE)` 向预算做预留。
+2. 拿到 `ALLOW` 后,才调内层 model(`OpenAIServerModel` /
+   `InferenceClientModel` / `TransformersModel`)——上游 HTTP
+   只在预留确认之后才发出。
+3. 成功后,用真实的
+   `ChatMessage.token_usage.input_tokens + output_tokens` 计数提交预留。
+4. 拿到 `DENY` 时,抛出 `DecisionDenied`——你的 `CodeAgent.run` 会干净地
+   把错误往上抛;上游 HTTP **永远不会**发出。
+
+## `step_callbacks`——仅供观测的遥测
+
+SmolAgents 的 `MultiStepAgent` 接受 `step_callbacks: list[Callable]`。
+它们在每个 `ActionStep` / `PlanningStep` 完成**之后**才触发——它们
+**无法拒绝**一个待发的 LLM 调用,也**无法**在厂商 HTTP 之前做预留。
+适合做遥测镜像,不适合做管控。
+
+`spendguard_step_callback(client, run_id=...)` 这个 helper 返回一个同步的
+`Callable[[ActionStep | PlanningStep], None]`,它会发出一条
+观测性质的 `agent_step` 审计事件。这个 callable 会捕获所有
+`Exception`,所以遥测过程中 sidecar 挂掉也不会把宿主 agent 的 run
+搞崩。真正的管控面是 wrapper(`SpendGuardSmolModel`);这个 helper
+只是为了跟其他框架的 post-step hook 在 trace 上保持对称。
+
+## 为什么不包 LiteLLMModel?
+
+SmolAgents 自带 `LiteLLMModel`——一个走 LiteLLM 路由的 Model 子类。
+SpendGuard 早已通过 [LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/)(D12)
+在运行中的解释器里管控了每一次 `litellm.acompletion` /
+`completion` / `Router.acompletion` 调用。再用 `SpendGuardSmolModel`
+去包一个 `LiteLLMModel` 就会**重复管控**——D12 先打一次 PRE,
+然后 D25 又在 SmolAgents 调用边界上再打一次 PRE,一次调用产生两份预留。
+
+wrapper 在构造时就会拒绝这种组合:
+
+```python
+>>> SpendGuardSmolModel(inner=LiteLLMModel(...), ...)
+spendguard.integrations.smolagents.SpendGuardConfigError:
+SpendGuardSmolModel refuses to wrap a smolagents LiteLLMModel —
+the D12 LiteLLM SDK shim already gates every litellm.acompletion
+call. Use the shim directly: `pip install spendguard-litellm-shim`
+and let the raw LiteLLMModel call through.
+```
+
+## 跨语言 trace 共享
+
+共享的 `spendguard_run_context` contextvar 是从
+`spendguard.integrations.openai_agents` **复用**过来的(review-standards §1.3)。
+一个跨语言的 agent 栈——比如一个 OpenAI Agents `Runner.run` 调起一个
+SmolAgents `CodeAgent` 步骤——所有审计行会共享同一个 `run_id`,
+因为两个 adapter 读的是同一个模块级 contextvar:
+
+```python
+from agents import Runner, Agent
+from smolagents import CodeAgent, OpenAIServerModel
+
+from spendguard.integrations.openai_agents import (
+    SpendGuardAgentsModel, RunContext, run_context,
+)
+from spendguard.integrations.smolagents import SpendGuardSmolModel
+
+async with run_context(RunContext(run_id="poly-1")):
+    # ... drive both an openai_agents Agent and a smolagents CodeAgent;
+    # every audit row tagged decision_context.integration=openai_agents
+    # OR decision_context.integration=smolagents, all sharing run_id=poly-1.
+    ...
+```
+
+## 本地跑个 demo
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard
+cd agentic-spendguard
+make demo DEMO_MODE=agent_real_smolagents
+```
+
+这个 demo 会拉起 SpendGuard sidecar + 一个模拟的 OpenAI 兼容
+提供商(`counting-stub`),然后用 `SpendGuardSmolModel(inner=
+OpenAIServerModel(...)).generate(...)` 对这个 stub 发起调用。verify
+SQL 断言:
+
+- 1 行 `LLM_CALL_PRE` 决策记录,`decision='ALLOW'`、
+  `route='llm.call'`、
+  `decision_context.integration='smolagents'`。
+- 1 行配对的 `LLM_CALL_POST` 结果记录,`outcome='SUCCESS'`,且
+  `estimated_amount_atomic` 与 stub 上报的 token 用量吻合。
+
+## 上生产 checklist
+
+- **预算预分配。** 按 tenant / 按 `CodeAgent.run` 一次调用各预留一份预算;
+  `claim_estimator` 从 message payload 推算预期成本。
+- **Run context。** 每次 `CodeAgent.run` 调用绑一个
+  `run_context(RunContext(run_id=...))`。同一个 `run_id` 把这个 agent
+  产生的所有审计行串起来——跨 wrapper、`step_callbacks` 遥测,以及
+  同一栈里跑的任何其他框架 adapter。
+- **从同步入口驱动**,或者在外层 async 作用域里预先绑好 contextvar,
+  再通过 thread executor 派发同步 agent。SmolAgents 的 `Model.generate`
+  是**同步**的;wrapper 通过 `asyncio.run` 把异步的 sidecar RPC 桥接过来,
+  如果在一个正在运行的事件循环里调用它,就会抛 `SyncInAsyncContext`。
+- **按厂商定价。** SmolAgents 各内层 Model 暴露 `model_id` 的方式不一样
+  (`InferenceClientModel` / `OpenAIServerModel` 会设它;
+  `TransformersModel` 不设)。wrapper **没有默认的
+  claim_estimator**——你得显式传一个,这样 projector 才能解析单位定价,
+  而不必依赖某个非标准化的属性。
+
+## 来源 spec
+
+- `docs/specs/coverage/D25_smolagents/design.md`
+- `docs/specs/coverage/D25_smolagents/implementation.md`
+- `docs/specs/coverage/D25_smolagents/review-standards.md`

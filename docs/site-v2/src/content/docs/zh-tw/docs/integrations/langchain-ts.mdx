@@ -1,0 +1,209 @@
+---
+title: "LangChain.js callback handler"
+description: >-
+  把 Agentic SpendGuard 當成 LangChain.js 的 BaseCallbackHandler 安裝。任何
+  ChatModel 只要 `callbacks: [handler]` 就能直接接上 —— 在上游供應商 HTTP
+  請求發出前先做預算 reservation,串流結束時的 commit 對帳真實 token 用量,
+  全程留下帶簽章的稽核軌跡。
+---
+
+
+> LangChain.js(`@langchain/core@^0.3`)是目前 TS agent 圈最主流的一套。SpendGuard
+> 以 `SpendGuardCallbackHandler` 形式出貨 —— 就是一個標準的 `BaseCallbackHandler`,
+> 透過 `callbacks: [handler]` 掛到任何 `ChatOpenAI` / `ChatAnthropic` / `BaseChatModel` 上即可。
+> 不用 subclass model、也不用 fork proxy。同一個 handler 連 LangGraph 也一起涵蓋,
+> 因為 LangGraph 本來就是建在 `BaseChatModel` 之上。
+
+## Install
+
+```bash
+pnpm add @spendguard/sdk @spendguard/langchain @langchain/core @langchain/openai
+```
+
+`@spendguard/sdk` 跟 `@langchain/core` 兩者都宣告成 peer dependency,所以這個
+adapter 兩邊都不釘版本 —— 由你專案的 lockfile 決定。需要 Node 20.10+(底層
+substrate 用到 `await using` 加上穩定版的 `AsyncLocalStorage`)。
+
+## Quick start
+
+最小的端到端接線 —— 把一個 `SpendGuardClient` 連到 sidecar 的 UDS,交給
+`SpendGuardCallbackHandler`,再把 handler 丟進 `ChatOpenAI` 的 `callbacks:`
+陣列:
+
+```ts
+import { ChatOpenAI } from "@langchain/openai";
+import { HumanMessage } from "@langchain/core/messages";
+import { SpendGuardClient } from "@spendguard/sdk";
+import { SpendGuardCallbackHandler } from "@spendguard/langchain";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "langchain-js",
+});
+await client.connect();
+await client.handshake();
+
+const handler = new SpendGuardCallbackHandler({
+  client,
+  budgetId: "44444444-4444-4444-8444-444444444444",
+});
+
+const model = new ChatOpenAI({
+  model: "gpt-4o-mini",
+  callbacks: [handler],
+});
+
+try {
+  const res = await model.invoke([new HumanMessage("hello langchain")]);
+  console.log(res.content);
+} finally {
+  await client.close();
+}
+```
+
+每次 `model.invoke()` 背後發生的事:
+
+1. LangChain 的 `RunManager` 會在 OpenAI HTTP 呼叫**之前**先 fire
+   `handleChatModelStart`。handler 從 `(tenantId, runId, parentRunId)` 推導出
+   canonical idempotency key,然後帶著 `trigger="LLM_CALL_PRE"` 呼叫
+   `client.reserve(...)`。
+2. 一旦遇到 `DecisionDenied`(DENY / STOP / APPROVAL_REQUIRED),handler 會直接
+   **throw** —— `raiseError = true` 是刻意接好的,讓這個 throw 經由
+   `CallbackManager` 往上傳,在供應商 HTTP 呼叫**之前**就把 `model.invoke()` 擋下來。
+3. 成功的話,這筆 inflight 的 `(decisionId, reservationId)` 會以 LangChain 的
+   `runId` 當 key 暫存起來。接著 OpenAI HTTP 呼叫才發出去。
+4. `handleLLMEnd` 取出那筆 inflight entry,抽出供應商回報的 `tokenUsage`,經由
+   `client.commitEstimated(...)` 送出一筆 `SUCCESS` commit。`handleLLMError` 則
+   對稱地送出 `PROVIDER_ERROR` commit,並把錯誤訊息串到
+   `actualErrorMessage` 上。
+
+## Configuration
+
+handler 的選項介面支援把 `unitId` 直接傳遞下去(在 runner 環境裡設好
+`SPENDGUARD_UNIT_ID`,再把它當成 `unitId` 選項傳進來)。設計上預留、比較豐富的
+`windowInstanceId` / pricing / `claimEstimator` 等欄位,延到後面的 slice 才補。
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Type</th><th>Required</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>client</code></td><td><code>SpendGuardClient</code></td><td>YES</td><td>來自 <code>@spendguard/sdk</code>、已設定好的 substrate client。adapter 並不接管 client 的生命週期 —— <code>connect()</code> / <code>handshake()</code> / <code>close()</code> 都由使用端自己呼叫。</td></tr>
+    <tr><td><code>tenantId</code></td><td><code>string</code></td><td>NO</td><td>Tenant UUID 覆寫值。沒設的話,就用 <code>client</code> 在建構當下設定的那個 tenant。</td></tr>
+    <tr><td><code>budgetId</code></td><td><code>string</code></td><td>NO</td><td>當成 projected claim 之 <code>scopeId</code> 用的 Budget UUID。沒設時,handler 會退回用 <code>tenantId</code> 當 scopeId。</td></tr>
+  </tbody>
+</table>
+
+之後的某個 minor 版(`v0.x`)會把這個介面逐欄位補齊,對齊 Python 的
+`SpendGuardChatModel` 建構子(`windowInstanceId`、`unit`、`pricing`、
+`claimEstimator`、`route`、`callSignatureFn`、`claimEstimate`、
+`onApprovalRequired`)。這些擴充都是新增的 optional 欄位 —— 對 v0.1.0 的形狀
+不會造成 breaking change。
+
+## Limitations
+
+**SpendGuard 的 LangChain.js adapter 只做 callback-based 的 pre-call 加上
+end-of-stream commit。** handler 在上游供應商 HTTP 呼叫**之前**做 gate,在
+串流跑完**之後**做 commit。在你把它擺到長串流回應前面、或想倚賴 D04/5 完整
+設計介面之前,有幾件重要的事得先知道:
+
+- **架構是 callback-based,不是 model subclass。** LangChain.js 偏好 callback
+  handler;所以 SpendGuard 出的是 `BaseCallbackHandler`,而不是包一層
+  `BaseChatModel` subclass。throw-to-halt 這套機制倚賴
+  `raiseError = true` 跟 `awaitHandlers = true` —— 兩個都釘死在 handler
+  instance 上。你要是在下游把它們改掉,預算 gate 就不靈了。
+- **`raiseError = true` 的傳遞是 load-bearing 的。** 少了它,
+  `CallbackManager` 會把 `handleChatModelStart` 丟出的 throw 吞掉,預算 gate
+  就再也擋不住 LLM 呼叫。adapter 之所以明確把它釘住,就是為了防未來
+  `@langchain/core` 漂掉;千萬不要在 handler instance 上覆寫它。
+- **串流回應沒有 mid-stream cap。** SpendGuard 在 pre-call 階段 reserve 的是
+  predicted 預算。commit 是在 end-of-stream、對著真實的 `tokenUsage` 做的。
+  handler 從不會中途把跑到一半的串流拆掉來阻止 token 繼續吐 —— 超用的部分
+  會落進稽核鏈、並在 commit 時反映出來,但那些 token 早就吐出去了。
+- **DEGRADE 的 patch 套用會以 `MutationApplyFailed` 形式浮現。** 跟 Python
+  `spendguard-sdk[langchain]` v0.5.1 的立場一致。內建的 claim mutation 留到
+  後面的 slice 才做。
+- **沒有 tool-call 的 mid-loop gating。** 每次 tool call 都是它自己的 LangChain
+  事件;substrate 是逐次 call 處理 PRE/POST。跨 tool 的預算強制是 contract
+  層的責任,不是 adapter 的。
+
+## Demo
+
+附帶的 docker-compose demo 會用一個真的 `ChatOpenAI` + sidecar + counting-stub 供應商,
+端到端跑完整的 ALLOW + DENY + STREAM 三種情境來驗證:
+
+```bash
+make demo-up DEMO_MODE=langchain_ts
+```
+
+這個 mode 會啟起 `postgres + sidecar + langchain-runner + counting-stub`,接著
+從位於
+[`examples/langchain-ts/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/langchain-ts/)
+的 Node 範例跑三次 invocation:
+
+- **ALLOW** —— 預算內的小訊息。`handleChatModelStart` fire PRE,
+  `client.reserve()` 回 ALLOW,`ChatOpenAI` HTTP 呼叫發出去,counter +1,
+  `handleLLMEnd` 帶著真實 token 用量送出一筆 `SUCCESS` commit。
+- **DENY** —— `spendguard_estimate_override=2000000000` 直接衝破預先種好的
+  1B 硬上限。sidecar 的 contract evaluator 送出 `SPENDGUARD_DENY`,
+  `client.reserve()` 丟出 `DecisionDenied`,`model.invoke()` 在 OpenAI HTTP
+  呼叫**之前**就停掉。counting-stub 的 counter 維持不變(證明 gate 是在
+  pre-call 階段 fire 的)。
+- **STREAM** —— `streaming: true` 走的是 SSE chunked 路徑。PRE 在串流開啟時
+  fire 一次,POST 在串流結束時對著真實的 `usage.completion_tokens` commit 一次。
+
+乾淨跑完的成功訊息:
+
+```
+[demo] langchain_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+完整細節和 verify-SQL gate 都在
+[`deploy/demo/langchain_ts/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/langchain_ts/README.md)。
+
+## Troubleshooting
+
+常見的啟動階段和第一次呼叫時會遇到的錯誤。substrate 那些 typed exception 都從
+`@spendguard/langchain` 重新 export 出來了,所以你可以直接 pattern-match
+`DecisionDenied` / `SidecarUnavailable`,不用再多一個 import。
+
+- **`DecisionDenied: reserve() denied by contract`** —— 預算用完、或某條
+  contract 規則送出 `SPENDGUARD_DENY` 時的預期行為。handler 會 rethrow,
+  `model.invoke()` 停掉,OpenAI HTTP 呼叫完全不會 fire。去 sidecar log 查是
+  哪條規則命中;ledger 裡那筆 decision row 的 `decision_context.contract_rule`
+  會帶著它。
+
+- **預算 gate 沒擋住 —— 供應商呼叫還是發出去了。** 幾乎都是因為呼叫路徑上某處
+  `raiseError = false`(可能是 handler instance 上被覆寫,或外層包了一個會把
+  它剝掉的 `CallbackManager`)。adapter 在建構時就把 `raiseError = true` 跟
+  `awaitHandlers = true` 釘住;兩個都不要覆寫。設
+  `LANGCHAIN_VERBOSE=true` 就能重現 —— `CallbackManager` 會把被吞掉的那個
+  throw log 出來。
+
+- **`SidecarUnavailable: handshake timeout`** —— sidecar 的 UDS 路徑
+  (`SPENDGUARD_SIDECAR_UDS`,預設 `/var/run/spendguard/adapter.sock`)連不上。
+  確認 sidecar 容器有起來、socket 檔存在,而且你的 Node process 對它有
+  讀寫權限。在 demo overlay 裡這是由
+  `deploy/demo/langchain_ts/docker-compose.yaml` 接好的;在 demo 之外,把同一個
+  socket 路徑掛進你 Node 容器的 `/var/run/spendguard/`。
+
+- **`handleLLMEnd: no inflight entry for runId=...`** —— 當 adapter 看到某個
+  `runId` 的 POST commit、卻沒有對應的 inflight reservation 時,會 log 一行
+  warn 然後 return。在降級情境下這是無害的(PRE 階段遇到
+  `SidecarUnavailable` —— adapter 在沒 gate 的情況下放 LLM 呼叫過去)。如果你
+  看到它前面沒有 `SidecarUnavailable`,那就要懷疑是框架重複送了一次
+  `handleLLMEnd` —— substrate 的 in-process `DecisionCache` 會在 commit 時把
+  重複的那筆收掉。
+
+- **`TypeError: client.reserve is not a function`** —— 你 import 的
+  `@spendguard/langchain` 配到的是 `reserve()` 改名之前的 `@spendguard/sdk`
+  版本。v0.1.0 的 adapter 需要 `@spendguard/sdk@^0.1.0`。用
+  `pnpm add @spendguard/sdk@latest` 升上去。
+
+## Related
+
+- [Quickstart](../../quickstart/) —— 5 分鐘把整套 SpendGuard stack 跑起來
+- [LangChain & LangGraph (Python)](../langchain/) —— 這個 adapter 的 Python 姊妹版
+- [Contract YAML reference](../../contracts/yaml/) —— 撰寫 allow/stop 規則
+- 其他 adapter 整合:[Pydantic-AI](../pydantic-ai/) · [OpenAI Agents SDK](../openai-agents/) · [Microsoft AGT](../agt/) · [LiteLLM proxy guardrail](../litellm-proxy/)

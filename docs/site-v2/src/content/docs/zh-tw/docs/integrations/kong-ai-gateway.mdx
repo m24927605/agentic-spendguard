@@ -1,0 +1,227 @@
+---
+title: "Kong AI Gateway — spendguard 外掛 (Go + Lua)"
+description: >-
+  把 Agentic SpendGuard 當成 first-class 的 Kong AI Gateway 外掛來裝。
+  在 `access` phase 做 call 前的 budget reservation，在 `body_filter`
+  做 call 後的 commit。Go 外掛走 production，Lua port 給 Kong OSS
+  3.0–3.5 的 deployment。Sidecar 以 JSON-over-HTTPS+mTLS 跟一個
+  SpendGuard companion service 對接。
+---
+
+
+> Kong AI Gateway 在 2026 年出了 `ai-proxy` / `ai-prompt-guard` /
+> `ai-rate-limiting-advanced` 這一系列外掛。SpendGuard 以 `spendguard`
+> 的身分擺在旁邊一起跑 —— 它是一個跑在 `access` + `body_filter` 的
+> Kong 外掛，會在任何 provider 收到流量之前，先 gate 住上游的 LLM API
+> traffic。Go 外掛(`plugins/kong/spendguard-go/`)是我們支援的
+> production 路線;另外在 `plugins/kong/spendguard-lua/` 有一個
+> experimental 的 Lua port，給那些沒辦法在 worker 旁邊跑
+> `go-plugin-server` subprocess 的 Kong OSS deployment 用。
+
+## 為什麼要做成 Kong 外掛
+
+Kong DataPlane 的 worker 跟 SpendGuard sidecar pod 活在**不同的
+network namespace**，所以一般 adapter 那套 UDS 契約(用
+SO_PEERCRED 認證、同一個 pod 內)在這裡根本連不到。Kong 外掛改走
+**HTTPS+mTLS** 的 companion listener，跑的是同一條 decision lane:
+
+- `POST /v1/tokenize` —— 對 request body 做 token 計數
+- `POST /v1/decision` —— reserve 的判決(`ALLOW` / `DENY` / `DEGRADE`)
+- `POST /v1/trace` —— 在 end-of-body 發出 `LLM_CALL_POST.SUCCESS` /
+  `RUN_ABORTED` 的 trace event
+
+這個 companion service 本身就是一顆跑在 "HTTP companion" 模式的
+SpendGuard sidecar —— 同一支 binary、同一條 audit chain，只是換了個
+transport。
+
+## 安裝
+
+### Production (Helm)
+
+```bash
+helm install spendguard ./charts/spendguard \
+  --set kongPlugin.enabled=true \
+  --set kongPlugin.tenantId=00000000-0000-4000-8000-000000000001 \
+  --set kongPlugin.svid.secretName=spendguard-kong-svid
+```
+
+這個 chart 會幫 Kong 路線 render 出四個 resource:
+
+- **Deployment** `release-name-spendguard-kong-companion` —— sidecar
+  binary，帶著 `SPENDGUARD_SIDECAR_HTTP_COMPANION_PORT=8443` 跑
+- **Service** `release-name-spendguard-kong-companion` —— ClusterIP，
+  對外開 port 8443(mTLS)+ 9090(probe)
+- **ServiceAccount** —— 給 cert-manager binding 用的 workload identity
+- **NetworkPolicy** —— ingress 只放行帶有
+  `app.kubernetes.io/name=kong` label 的 pod(也就是 Kong DataPlane 那組)
+
+外掛本體則是以 SpendGuard 的 Go 外掛 binary(或 Lua rockspec)的形式
+出貨。請依照
+[`examples/kong-gateway-composite/go-build.sh`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/kong-gateway-composite/go-build.sh)
+這份 reference recipe，把它 bake 進你的 Kong DataPlane image 裡。
+
+### 綁定外掛
+
+[`examples/kong-gateway-composite/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/kong-gateway-composite/)
+這邊的 reference manifest 出了兩個 `KongPlugin` resource(Go + Lua)。
+挑一個 apply 下去，然後在目標 Service 上加 annotation:
+
+```bash
+kubectl apply -f examples/kong-gateway-composite/kong-plugin-crd.yaml
+kubectl annotate svc my-llm-upstream \
+  konghq.com/plugins=spendguard-go --overwrite
+```
+
+如果走 DB-less 模式(`KONG_DATABASE=off`)，operator 要把外掛
+inline 進自己宣告式的 `kong.yml` 裡 —— 完整範例請看
+[`examples/kong-gateway-composite/kong-conf.yaml`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/kong-gateway-composite/kong-conf.yaml)。
+
+## 設定
+
+外掛的 schema 在 Go 跟 Lua 兩個 distribution 之間欄位是對等的，
+兩邊吃的是同一份 `KongPlugin` CRD。
+
+| Key | 必填 | 預設 | 用途 |
+|-----|----------|---------|---------|
+| `sidecar_url` | 是 | — | SpendGuard companion 的 HTTPS URL，一定要 `https://` 開頭。 |
+| `sidecar_ca_pem` / `sidecar_ca_file` | 是(擇一) | — | 簽發 companion workload cert 的 CA bundle。 |
+| `client_cert_pem` / `client_cert_file` | 是(擇一) | — | 外掛的 workload cert(SVID URI SAN 裡編了 tenant)。 |
+| `client_key_pem` / `client_key_file` | 是(擇一) | — | 對應的 private key。 |
+| `tenant_id` | 是 | — | Tenant UUID;一定要跟 SVID URI SAN 裡的 tenant 一致。 |
+| `fail_open` | 是 | `false` | 預設 fail-closed。設成 `true` 時，sidecar 出錯會 degrade-to-allow，並丟一行 `kong.log.warn`。 |
+| `timeout_ms` | 是 | `500` | 打到 companion 的每個 request 的 HTTP timeout(50–30000ms)。 |
+| `budget_id` | 否 | — | 給 multi-budget tenant 用的可選 explicit budget binding。 |
+| `prompt_class` | 是 | `general` | contract evaluator 的 prompt class。 |
+
+### 外掛 priority
+
+`PRIORITY = 950`，排在 Kong 的 `ai-proxy`(770)上面。SpendGuard 會
+在 `ai-proxy` **之前**先觸發,所以 reserve 是發生在 upstream auth 跟
+provider routing 的上游。這條 constraint 的理由請看
+[`docs/specs/coverage/D09_kong_ai_gateway/review-standards.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D09_kong_ai_gateway/review-standards.md)
+§6.3。
+
+### Request buffering
+
+Kong 的 `access` phase 得拿到完整的 request body，SpendGuard 才有
+東西可以 token 計數。所以你要 gate 的那幾條 route，記得設
+`request_buffering: true`;不然 `kong.request.get_raw_body()` 會回
+nil，外掛就會 fail closed 並丟出 `SPENDGUARD_EMPTY_BODY`。
+
+## 生命週期
+
+依
+[`docs/specs/coverage/D09_kong_ai_gateway/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D09_kong_ai_gateway/design.md)
+§3.3，外掛跑兩個 phase:
+
+### `access` (reserve)
+
+1. `kong.request.get_raw_body()` —— 把 buffer 起來的上游 body 撈出來
+2. 靠 JSON key + path 判斷 provider 的形狀(OpenAI 的
+   `/v1/chat/completions` 還是 Anthropic 的 `/v1/messages`)
+3. `POST /v1/tokenize` —— 拿 `input_tokens`
+4. `POST /v1/decision` —— 拿判決
+5. 分支:
+   - **ALLOW** → 把 `reservation_id` 塞進 `kong.ctx.shared`，然後放行
+   - **DENY** → `kong.response.exit(429, { code: "SPENDGUARD_DENY" })`
+   - **DEGRADE** → `fail_open=false` → `kong.response.exit(503)`,
+     否則就 log 一下後放行
+
+### `body_filter` (commit)
+
+1. 一直累積 `ngx.arg[1]` 的 chunk，直到 `ngx.arg[2]` 變 true
+2. parse 出 provider 的 usage(OpenAI 的 `usage.prompt_tokens` /
+   Anthropic 的 `usage.input_tokens`)
+3. 帶著 `ACCEPTED` + token 數打 `POST /v1/trace`(碰到上游 5xx /
+   parse 失敗就送 `REJECTED`)
+4. 把 `kong.ctx.shared[spendguard_committed] = "1"` 立起來，這樣就算
+   filter 重複觸發一次也是 no-op
+
+## 限制
+
+**SpendGuard 的 Kong 外掛只做 INV-5 的 end-of-stream commit。** gate
+跑在 `access` phase，reconciliation 跑在 end-of-body —— 中途並沒有
+那種逐 token 觸發的 cap。
+
+講白一點:
+
+- **沒有 streaming SSE 的 budget enforcement。** Kong 的
+  `response_buffering: true` 會在 `body_filter` phase 開跑之前把整段
+  上游 response buffer 起來;SpendGuard 是在 end-of-body 一次把 buffer
+  好的 body 讀完。依 design §3.5，stream 中途取消是 v1 的 non-goal。
+- **不會去動 Bedrock 的 SigV4。** v1 涵蓋的是 OpenAI 形狀跟 Anthropic
+  形狀的 payload。Bedrock routing 沿用 Kong `ai-proxy` 的 route_type
+  欄位;SpendGuard 不會去改 upstream-auth 的 header。
+- **沒有 Konnect SaaS plane 整合。** 出貨只能透過 `KongPlugin` CRD
+  或 `kong.conf`。SpendGuard 不會上架到 Kong 託管的 plugin registry。
+
+## Lua fallback
+
+這個 Lua port 是為了那些沒辦法在 worker 旁邊跑 `go-plugin-server`
+subprocess 的 Kong OSS 3.0–3.5 deployment 而存在的。它涵蓋一樣的
+`access` + `body_filter` 生命週期，文件上標的是 **experimental**:
+
+```bash
+luarocks install spendguard
+```
+
+接著一樣用 `KongPlugin` CRD、`plugin: spendguard` 來綁(Lua port 跟
+Go 外掛都註冊在同一個 `spendguard` 外掛名底下)。Lua port 拿不到
+conformance-test 的保證 —— parity table 請看
+[`plugins/kong/spendguard-lua/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/plugins/kong/spendguard-lua/README.md)。
+
+## Demo
+
+我們附了一個 docker-compose demo，針對一個真的 Kong gateway +
+SpendGuard companion + counting-stub provider，端到端證明完整的
+ALLOW + DENY + STREAM 矩陣:
+
+```bash
+make demo-up DEMO_MODE=kong_gateway_real
+```
+
+這個 mode 會把 `postgres + sidecar + kong-companion + kong-gateway +
+counting-stub` 一起拉起來，然後透過 Kong 打三個 call 進去:
+
+- **ALLOW** —— body 很小、在 budget 內 → HTTP 200，counting-stub 的
+  counter `+1`，sidecar 的 reservation row 有產生。
+- **DENY** —— 用 `X-Spendguard-Estimate-Override: 2000000000` 這個
+  header 把 seed 進去的 1B hard-cap 直接撐爆 → HTTP 429，counting-stub
+  的 counter **沒變**(證明 gate 確實在打上游之前就先觸發了)。
+- **STREAM** —— `stream=true` 的 body、在 budget 內 → HTTP 200,
+  counting-stub `+1`，有 end-of-body 的 commit row。
+
+跑乾淨時的成功訊息:
+
+```
+[demo] kong_gateway_real ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+完整細節跟 verify-SQL 的 gate 在
+[`deploy/demo/kong_gateway/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/kong_gateway/README.md)。
+
+## 疑難排解
+
+- **`SPENDGUARD_EMPTY_BODY`** —— 在 route 上設 `request_buffering: true`。
+  `access` phase 需要 buffer 好的 body 才能做 token 計數。
+- **`SPENDGUARD_UNRECOGNISED_REQUEST`** —— body 長得不像 OpenAI 的
+  `/v1/chat/completions`、也不像 Anthropic 的 `/v1/messages`。v1 只
+  cover 這兩家 provider;Bedrock / Mistral 請先讓它走 `ai-proxy`，
+  SpendGuard 才看得到正規化後的 body。
+- **`SPENDGUARD_FAIL_CLOSED: plugin misconfigured`** —— `sidecar_url` /
+  `client_cert_*` / `tenant_id` 漏了或格式不對。看一下 startup log;
+  設定錯了外掛會直接拒絕 load。
+- **`SPENDGUARD_TOKENIZE_UNREACHABLE`** —— 外掛連不到 companion。確認
+  NetworkPolicy render 出來是對的(Kong DataPlane 的 pod 一定要帶
+  `app.kubernetes.io/name=kong`)。
+- **明明沒真的超支卻 `429 SPENDGUARD_DENY`** —— contract evaluator
+  發了一個 hard-cap STOP。檢查 seed 進去的 budget / bundle 設定;
+  `X-Spendguard-Estimate-Override` 這個 demo header 是**只給 demo
+  用的**，不會 compile 進 production binary。
+
+## 相關文件
+
+- [Quickstart](../../quickstart/) —— 5 分鐘把整套 SpendGuard stack 拉起來
+- [Contract YAML 參考](../../contracts/yaml/) —— 撰寫 allow/stop 規則
+- [Drop-in:LiteLLM proxy 模式](../../drop-in/litellm/) —— egress 路徑的另一種選擇
+- 其他 adapter 整合:[Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [OpenAI Agents SDK](../openai-agents/) · [Microsoft AGT](../agt/)

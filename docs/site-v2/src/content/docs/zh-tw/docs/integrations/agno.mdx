@@ -1,0 +1,187 @@
+---
+title: "用 SpendGuard 控管 Agno 的預算"
+description: >-
+  用 Agentic SpendGuard 為 Agno (agno >= 2.0) 做 pre-call token 預算控管。
+  一組 pre/post hook 就涵蓋 Agno 的每一個 Model 供應商——OpenAIChat、
+  Claude、Gemini、Groq、xAI、DeepSeek——因為 gating 是發生在
+  agent-runtime 邊界,不是 model 邊界。
+---
+
+> 你的 Agno `Agent` 在迴圈裡對著好幾百筆輸入跑 `await agent.arun(prompt)`,
+> 每一輪都會發出一次 model 呼叫。沒有 gate 的話,你要等到下個月帳單儀表板
+> 才會發現花了多少錢。SpendGuard 透過
+> `Agent(pre_hooks=[pre()], post_hooks=[post()])` 把一組
+> `(pre_hook, post_hook)` 插進 Agno,讓每一次 model 呼叫在上游請求送出
+> *之前* 就先對預算做 reserve——而且同一組 hook 在 OpenAIChat、Claude、
+> Gemini、Groq、xAI、DeepSeek 各種後端之間零修改通吃。
+
+## 為什麼你會想要這個
+
+- **一組 hook,所有後端通吃。** Agno 的 `Model` 抽象是多型的
+  (OpenAIChat / Claude / Gemini / Groq / xAI / DeepSeek / 自訂)。
+  在 agent-runtime 邊界做 gating,代表同一組 factory 就涵蓋全部,
+  你不用為每家供應商各寫一個 wrapper。
+- **是 pre-call 直接擋,不是事後記帳。** DENY 會以 Agno 的
+  `InputCheckError` 形式冒出來(原本的 `DecisionDenied` 透過
+  `__cause__` 串接保留),而且是在 Agno 發出 model HTTP **之前**。
+  上游呼叫**根本不會**送出去。
+- **靠形狀辨識供應商,不是靠字串。** 直接讀
+  `run_output.metrics.total_tokens`(或退而用
+  `input_tokens + output_tokens`)——不需要去 parse model 字串。
+- **稽核 + 審批 pipeline 跟其他每個 framework 共用。** 這些 hook 寫進
+  的是跟 LangChain、Pydantic-AI、OpenAI Agents、Google ADK、AWS Strands、
+  DSPy 整合同一條 SpendGuard ledger。共用的 `spendguard_run_context`
+  contextvar 意思是:外層一個 LangChain run 包著 Agno agent 時,會重用
+  同一個 `run_id`。
+
+## 安裝設定(60 秒)
+
+```bash
+pip install 'spendguard-sdk[agno]'
+```
+
+用 demo stack 把 sidecar 拉起來:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## 接起來
+
+```python
+import asyncio
+
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.agno import (
+    RunContext, SpendGuardAgnoPreHook, SpendGuardAgnoPostHook,
+    run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    pre = SpendGuardAgnoPreHook(
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+    )
+    post = SpendGuardAgnoPostHook(
+        client=client,
+        unit=unit,
+        pricing=pricing,
+    )
+
+    agent = Agent(
+        model=OpenAIChat(id="gpt-4o-mini"),
+        pre_hooks=[pre()],
+        post_hooks=[post()],
+    )
+
+    async with run_context(RunContext(run_id="my-run-1")):
+        response = await agent.arun("Say hello in three words.")
+    print(response.content)
+
+
+asyncio.run(main())
+```
+
+**Factory 呼叫很重要。** `pre_hooks=[pre()]`——注意那個 `()`。
+`SpendGuardAgnoPreHook` 這個 instance 是一個 factory,呼叫它會回傳
+Agno 透過 `inspect.signature` 去檢視的那個 closure。`SpendGuardAgnoPostHook`
+也是同樣的模式。
+
+## 運作原理
+
+Agno 的 `Agent.arun(...)` 會在建好 run context 之後先走過 `pre_hooks`,
+接著發出 model HTTP,然後帶著 run output 走過 `post_hooks`。每個 hook 都
+會被 `inspect.signature` 拿去跟 Agno 內部的 `all_args` dict 做過濾——
+closure 只會收到它自己宣告的那些參數。
+
+SpendGuard 的 pre-hook 宣告 `(agent, run_input)`,然後:
+
+1. 從共用的 contextvar 解析出 `RunContext.run_id`。
+2. 對 `agent.model.id || run_input` 推導出一個穩定的 signature。
+3. 透過 `derive_uuid_from_signature` 鑄出決定性的 `llm_call_id` /
+   `decision_id` / `idempotency_key`,讓 retry 能命中 sidecar cache。
+4. 呼叫 `client.request_decision(LLM_CALL_PRE, ...)`。
+5. 把 reservation 以 `(run_id, signature)` 為 key,塞進一個上限 10k 筆
+   的 FIFO map。
+6. 碰到 STOP / DENY 時,把 `DecisionDenied` 包成 Agno 的
+   `InputCheckError`,這樣 Agno 的 hook-loop 才會真的中止這個 run
+   (Agno runtime 會 catch `Exception`,但只會 re-raise
+   `Input/OutputCheckError`——詳見下面 DEVIATION-1)。
+
+post-hook 宣告 `(agent, run_output)`,然後:
+
+1. 從 `run_output.input` 重算出同一個 signature。
+2. 把 inflight slot pop 出來。如果不存在,就記一筆 warning + no-op——
+   絕不會在沒有對應 reserve 的情況下做 commit。
+3. 從 `run_output.metrics` 抽出 `total_tokens`(優先用 `total_tokens`,
+   退而用 `input_tokens + output_tokens`)。
+4. run 健康時呼叫 `client.emit_llm_call_post(SUCCESS, ...)`。
+5. 碰到 `status == ERROR` / `run_output.error` 有設值時,發出
+   `outcome=PROVIDER_ERROR`,讓 projector 把 reservation 釋放掉
+   (不會洩漏)。
+
+## 多 model 的 `Team` agent
+
+單一一個 `SpendGuardAgnoPreHook` instance 就能處理多 model 的 `Team`
+agent,因為預設的 claim estimator 是在 CALL 的當下才去解析
+`agent.model.id`,不是在建構的當下。你不需要每個後端各配一組 hook。
+
+## 與 spec 的 DEVIATIONS(偏差)
+
+D22 的 design.md 當初是針對一份 Agno 1.x 的提案寫的,而那份提案並沒有
+真的推出 `pre_hooks` / `post_hooks` 這個介面;這個介面是到 Agno 2.x 才
+定型的。實際出貨的 adapter pin 在 `agno>=2.0,<3`,並且追的是真正的 2.x
+contract:
+
+| 偏差 | spec 怎麼說 | 實際情況 | 如何解決 |
+|---|---|---|---|
+| DEVIATION-1 | `STOP / DENY raises DecisionDenied; Agno propagates` | Agno 2.x 的 hook loop 只 re-raise `Input/OutputCheckError`;其他一律只是記 log + model 照樣被呼叫 | pre-hook 把 `DecisionDenied` 包成 `InputCheckError`。原本的串在 `__cause__` 上,讓下游的 catch 還能正常運作 |
+| DEVIATION-2 | post-hook 宣告 `(agent, run_response)` | Agno 2.x 把結果放在 `run_output` 底下傳進來,並且是按參數名稱做過濾 | post-hook 的 closure 宣告 `(agent, run_output)`。測試會去 assert 這個字面名稱 |
+
+這兩個偏差都記在 module docstring 裡,並且由 unit suite
+(`tests/integrations/agno/test_agno_pre_post.py` 的 T16 / T17 / T28)
+實際跑過驗證。
+
+## 限制
+
+D22 v1 明確不涵蓋以下任何一項:
+
+- **逐 token 的串流 gating。** 透過 `Agent.arun(stream=True)` 的串流是在
+  PRE(開串流之前)跟 POST(串流結束之後)做 gating。串流中間的 chunk
+  不會被個別 gating。
+- **`tool_hooks` 的 per-tool 預算 gating。** 工具花費會滾進母層 LM 的
+  reservation。per-tool 預算保留給 D22.1 處理。
+- **DEGRADE mutation patch 的套用。** 會以 `MutationApplyFailed` 的形式
+  冒出來,而不是真的去套用(跟 pydantic-ai / langchain 整合一致)。
+- **審批—resume 的 UI。** `ApprovalRequired` 會往外傳(依 DEVIATION-1
+  包成 `InputCheckError`);resume 由呼叫端自己處理。
+
+## 參考
+
+* Spec: `docs/specs/coverage/D22_agno/`
+* Module: `sdk/python/src/spendguard/integrations/agno/`
+* Demo overlay: `deploy/demo/agent_real_agno/`
+* Test suite: `sdk/python/tests/integrations/agno/`

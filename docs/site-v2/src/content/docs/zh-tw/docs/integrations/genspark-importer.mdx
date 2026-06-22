@@ -1,0 +1,289 @@
+---
+title: "Genspark 帳單匯入器（Super Agent — 僅供對帳）"
+description: >-
+  針對 Genspark Super Agent 後台用量的事後匯入器。SpendGuard 沒辦法
+  對 Genspark 的花費做管制 — Genspark 的 agent loop 整個跑在它自己的雲端
+  VM 裡。這個匯入器會把 credit 消耗拉回來，透過內建的價目表換算成估計的
+  $ 金額，再發出帶有 reservation_source=subscription_meter /
+  import_source=genspark_team_api 標籤的簽章稽核事件。
+sidebar:
+  badge:
+    text: Reconciliation only
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="SpendGuard 沒辦法管制 Genspark 花費 — 只有 Genspark 自己能">
+  Genspark Super Agent 的 agent loop 是跑在 Genspark 自己的雲端
+  VM 裡面。逐筆 LLM 呼叫的 payload 從頭到尾都不會經過客戶這邊的網路；
+  egress proxy 跟 SDK adapter 攔不到任何東西。所以 Genspark
+  匯入器**只能拿來對帳** — 它把事後的 credit
+  消耗拉回來，讓 dashboard 給 CIO/CFO 看的 single-pane-of-glass 視圖不至於
+  缺一塊，但它**不會** gate、不會 throttle、也不會去
+  short-circuit 任何 Genspark session。那個 contract 是 Genspark 的責任。
+  架構上的推論可以參考
+  [framework-coverage 策略備忘錄 Archetype IV](https://github.com/m24927605/agentic-spendguard/blob/main/docs/strategy/framework-coverage-2026-06.md)。
+</Aside>
+
+## 這東西是什麼
+
+`spendguard-importer-genspark` 這個 crate（D16）是一個 Rust binary +
+library，它會做三件事：
+
+1. 從 Genspark 後台 API
+   （`/v1/admin/usage?workspace=…&from=…&to=…`）拉用量 — 用
+   `live` feature gate 鎖起來，所以預設 build 是完全不碰 HTTP 的。
+2. 透過內建在
+   `services/importer_genspark/assets/genspark_credit_prices.json` 的價目表，
+   把 **credits** 換算成估計的 USD。
+3. 發出帶有 `reservation_source=subscription_meter` 跟
+   `import_source=genspark_team_api` 標籤的簽章
+   `spendguard.audit.import.genspark_credit` CloudEvents — 它們會落到跟
+   D13 subscription-meter 列、以及 D14 Devin 匯入器列
+   同一個 dashboard 平面上。
+
+預設的 merge gate 是**消毒過的 fixture replay** — 也就是 commit 進版控的
+`tests/fixtures/genspark_usage.json` 快照。Live 模式要 operator 自己 opt-in 才會跑。
+
+## Credit → $ 換算
+
+| 方案 | 每月 $ | 每月 credit 配額 | `usd_per_credit` |
+|------|-----------|---------------------|-------------------|
+| **plus** | $19.99 | 10,000 | $0.001999/credit |
+| **pro** | $24.99 | 12,500 | $0.0019992/credit |
+| **premium** | $249.99 | 125,000 | $0.00199992/credit |
+
+換算本身是純函式：以 micro-USD 計的
+`round(credits_consumed × usd_per_credit × 1_000_000)`，
+overflow 時飽和在 `i64::MAX`。價目表的
+`pricing_version` 會在換算當下就蓋章蓋到每一列發出去的資料上 —
+事後回頭去改費率檔，**不會**去改寫歷史的稽核列。
+
+### 未知方案的 fallback
+
+如果 Genspark API 回來一個內建價目表裡**沒有**的方案 slug（比如未來某個
+`"enterprise"` 等級，或是 window 中途改名），匯入器會把那一列以
+`amount_micro_usd = 0` 發出，並蓋上
+`reason_code = "genspark_plan_unknown"`。Dashboard 必須能分辨
+**「不知道費率」**跟**「花費為零」**這兩件事 — credit
+欄位還是會填，所以即使金額對不上，operator 還是看得到 Genspark
+的消耗量。這兩個欄位永遠是一起設的；只設其中一個的話，要嘛會悄悄算錯價
+（看得到非零 USD 卻沒有對應費率），要嘛 dashboard 會完全收不到訊號。
+
+## 安裝
+
+### Fixture 模式（預設的 merge gate）
+
+<div is:raw>
+
+```bash
+cargo run -p spendguard-importer-genspark --bin importer_genspark -- \
+    --mode fixture \
+    --fixture services/importer_genspark/tests/fixtures/genspark_usage.json \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+</div>
+
+這個 binary 會把每一筆 record 各印一個 CloudEvent 到 stdout；demo
+的 runner script（`deploy/demo/import_genspark_fixture_demo.sh`）則會把
+INSERT 路徑接到 demo 用的 postgres 上。
+
+### Live 模式（要 operator opt-in）
+
+<div is:raw>
+
+```bash
+export GENSPARK_API_TOKEN=<Admin API token, at least 32 chars>
+export GENSPARK_API_BASE_URL=https://api.genspark.ai/v1   # optional override
+
+cargo run -p spendguard-importer-genspark --features live --bin importer_genspark -- \
+    --mode live \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+</div>
+
+`live` 這個 feature 只會拉進帶 `rustls-tls` 的 `reqwest`（不碰
+`native-tls`、不碰 `openssl-sys`），而且每筆 request 用 30s
+timeout，再加上有上限的指數 backoff（cap：1 小時），用來扛 rate-limit。
+
+針對 `GENSPARK_API_TOKEN` 的 runtime gate 會在啟動時做三道檢查，
+而且每道都有各自不一樣的錯誤訊息，方便 operator debug：
+
+1. **Missing** — 這個環境變數根本沒設。
+2. **Empty** — 環境變數有設，但 trim 掉空白之後是空的。
+3. **Too short** — 值少於 32 個字元（用來擋
+   `"TODO"` / `"changeme"` 這類佔位字串）。
+
+Token 的 scope 請只開到 **Genspark Admin Usage API** 那一個 scope —
+最小權限原則。
+
+## 冪等性（Idempotency）
+
+同一個 window 重跑不會重複發送。CloudEvent 的
+`event.id` 是從
+`(workspace_id, task_id, window_end)` 推導出來的 deterministic UUIDv5；
+canonical_ingest 那邊則靠既有的 `event_replay_dedup` table 來去重。
+
+所以這個 demo 你愛重跑幾次就重跑幾次：
+
+<div is:raw>
+
+```bash
+make -C deploy/demo demo-verify-import-genspark-fixture
+make -C deploy/demo demo-verify-import-genspark-fixture   # idempotent; 0 new rows
+```
+
+</div>
+
+## CloudEvent 範例
+
+<div is:raw>
+
+```json
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.genspark_credit",
+  "source": "spendguard-importer-genspark",
+  "id": "018f4a3a-d971-7c16-91fe-d0169e715ba0",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/demo/genspark/workspace/FAKE_ws_001/task/FAKE_task_001",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "demo",
+    "budget_id": "genspark-budget",
+    "workspace_id": "FAKE_ws_001",
+    "task_id": "FAKE_task_001",
+    "plan": "plus",
+    "credits_consumed": 3200.0,
+    "usd_per_credit": 0.001999,
+    "amount_micro_usd": 6396800,
+    "reason_code": null,
+    "pricing_version": "genspark-credit-v1-2026-06",
+    "window_start": "2026-06-01T00:00:00Z",
+    "window_end": "2026-06-01T01:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "genspark_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "fd2c0bb772bfbf2605ce09204aed0025cd754c3edce7296ee281637e5a52baf6",
+    "task_category": "research"
+  }
+}
+```
+
+</div>
+
+## 價目表範例
+
+<div is:raw>
+
+```json
+{
+  "pricing_version": "genspark-credit-v1-2026-06",
+  "effective_from": "2026-06-01T00:00:00Z",
+  "currency": "USD",
+  "rates": [
+    { "plan": "plus",    "monthly_usd": 19.99,  "monthly_credits": 10000,  "usd_per_credit": 0.001999 },
+    { "plan": "pro",     "monthly_usd": 24.99,  "monthly_credits": 12500,  "usd_per_credit": 0.0019992 },
+    { "plan": "premium", "monthly_usd": 249.99, "monthly_credits": 125000, "usd_per_credit": 0.00199992 }
+  ]
+}
+```
+
+</div>
+
+## 為什麼我們沒辦法 gate
+
+Genspark Super Agent 的 loop **整個跑在 Genspark 自己的雲端
+VM 裡**。客戶這邊的 egress proxy 從頭到尾看不到 LLM API 呼叫的 payload —
+Genspark 的 VM 是從它自己的網路邊界裡面去 dial OpenAI / Anthropic
+/ 其他供應商。後台 API 只會給你事後的 credit 彙總，不會給你一個
+pre-call hook。
+
+這在 SpendGuard 的 framework-coverage 分析裡屬於 **Archetype IV**：
+一個完全託管的雲端 agent，客戶對它的網路毫無可見度。唯一可行的整合方式就是
+對帳 — 事後把帳單拉回來，攤在 dashboard 上，超過 threshold 就告警。
+除非 Genspark 自己出一個 pre-call webhook，否則做 gating 在架構上就是不可能。
+
+## Operator 的排程
+
+這個匯入器是一個**週期性的 worker**，不是 daemon。請用
+cron、Kubernetes CronJob、或你環境裡支援的任何方式去排它：
+
+<div is:raw>
+
+```yaml
+# Kubernetes CronJob example — pull every hour.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: spendguard-importer-genspark
+spec:
+  schedule: "0 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: importer
+              image: ghcr.io/m24927605/agentic-spendguard/importer-genspark:latest
+              env:
+                - name: GENSPARK_API_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: genspark-admin-token
+                      key: token
+              args:
+                - --mode=live
+                - --tenant=$(SPENDGUARD_TENANT_ID)
+                - --budget=$(SPENDGUARD_BUDGET_ID)
+          restartPolicy: OnFailure
+```
+
+</div>
+
+## Dashboard 上你會看到什麼
+
+* 每個 task、每個 workspace 的估計 $ 金額 — 都標上
+  `pricing_version`。
+* 消耗的 credits（一定會有，連未知方案那種列也會有）。
+* `reservation_source = subscription_meter` 這個 filter 會把 Genspark
+  的花費跟 Devin、以及 Claude Code Pro / Codex 的
+  subscription-meter 列歸在一起（這些是 advisory 列，會跳過 BYOK ledger）。
+* 方案層級的 pivot：`plus` vs `pro` vs `premium` vs 未知。
+* 當供應商有填的時候，還會有 task-category 的拆解（`research` /
+  `code_generation` / …）。
+
+## 實作位置指引
+
+* Crate scaffold + Cargo.toml：
+  `services/importer_genspark/Cargo.toml` — 這個 crate 排除在 workspace 之外，
+  `publish = false`，並用 `live` feature gate 起來。
+* 純換算：
+  `services/importer_genspark/src/import_record.rs`
+  （`import_record_to_audit_row`）— 沒有 I/O，也不會去讀時鐘。
+* 價目表：
+  `services/importer_genspark/src/credit_price_table.rs` —
+  飽和式運算，會拒掉 NaN/Infinity/負數輸入。
+* CloudEvent builder：
+  `services/importer_genspark/src/cloudevent_envelope.rs` —
+  透過 `tests/golden/cloudevent_v1alpha1_*.json` 做 golden test。
+* Fixture loader：
+  `services/importer_genspark/src/fixture_loader.rs` — 在 parse 階段就硬擋掉
+  非合成的 ID（T9）。
+* Live client：
+  `services/importer_genspark/src/live/client.rs` — 只用 rustls 的
+  `reqwest` wrapper，帶有 typed 的 401/403/429/5xx 錯誤，外加一道嚴格的
+  三向 token gate（missing / empty / too-short）。
+* Migration：
+  `services/ledger/migrations/0061_import_source_widen_genspark.sql` —
+  把既有 `audit_outbox.import_source` 的 CHECK 放寬，納入
+  `genspark_team_api`。
+
+完整的設計考量加上 slice 層級的拆解，請看
+[`docs/specs/coverage/D16_genspark_importer/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D16_genspark_importer/design.md)。

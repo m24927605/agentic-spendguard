@@ -1,0 +1,219 @@
+---
+title: "用 SpendGuard 给 BeeAI Framework 做预算管控"
+description: >-
+  用 Agentic SpendGuard 为 BeeAI Framework
+  (beeai-framework >= 0.1.81) 做调用前的 token 预算管控。一次
+  subscribe_spendguard 调用就覆盖所有 BeeAI ChatModel 提供商——
+  OpenAIChatModel、WatsonxChatModel、OllamaChatModel、GroqChatModel——
+  因为管控点落在 agent-runtime 的 Emitter 上,而不是 model
+  边界。
+---
+
+> 你的 BeeAI `ReActAgent` 跑 `await agent.run(prompt)`,背后是一个开放式的
+> tool loop,每一轮都会扇出多次 LLM 调用。没有 gate,你下个月看账单
+> dashboard 才会知道花了多少。SpendGuard 通过
+> `subscribe_spendguard(agent, client, ...)` 往 BeeAI 里插一个 subscriber,
+> 让每一步 LLM 在上游调用发出*之前*就先对预算做 reserve——而且同一个
+> subscriber 对 `OpenAIChatModel`、`WatsonxChatModel`、
+> `OllamaChatModel`、`GroqChatModel`,或者你接进 agent 的任何其他
+> `ChatModel` 都通吃。
+
+## 为什么要用它
+
+- **一个 subscriber,所有后端通吃。** BeeAI 的 `ChatModel` 抽象是多态的
+  (OpenAI / Watsonx / Ollama / Groq / 自定义)。把 gate 放在 agent-runtime
+  的 `Emitter` 边界,意味着一次 `subscribe_spendguard` 调用就把它们全
+  覆盖了;你不用为每家提供商单独写 wrapper。
+- **调用前就拒绝,不是事后记账。** DENY 会以 `DecisionDenied` 暴露出来;
+  BeeAI 的 `Emitter._invoke` 把它包成 `EmitterError` 并保留
+  `__cause__`,所以 model 的 HTTP **绝不会**发出,你的 `try/except`
+  用这两种类型中的任意一种都能 catch 到。
+- **按 shape 而非按字符串做 provider-agnostic。** 从 `*.success` 的
+  payload 里读 `usage.total_tokens`(回退到
+  `prompt_tokens + completion_tokens`)——不需要解析 model 字符串。
+- **审计 + 审批流水线和其他所有 framework 共用。** 这个 subscriber 写入的
+  SpendGuard ledger,和 LangChain、Pydantic-AI、OpenAI Agents、Google ADK、
+  AWS Strands、DSPy、Agno 集成用的是同一个。共享的
+  `spendguard_run_context` contextvar 意味着一个包着 BeeAI agent 的
+  父 LangChain run 会复用同一个 `run_id`。
+
+## 安装(60 秒)
+
+```bash
+pip install 'spendguard-sdk[beeai]'
+```
+
+用 demo stack 起一个 sidecar:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## 接线
+
+```python
+import asyncio
+
+from beeai_framework.agents.react import ReActAgent
+from beeai_framework.backend.chat import ChatModel
+
+from spendguard import SpendGuardClient, new_uuid7
+from spendguard.integrations.beeai import (
+    RunContext, run_context, subscribe_spendguard,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    llm = ChatModel.from_name("openai:gpt-4o-mini")
+    agent = ReActAgent(llm=llm, tools=[])
+
+    unsubscribe = subscribe_spendguard(
+        agent, client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+    )
+    try:
+        async with run_context(RunContext(run_id=str(new_uuid7()))):
+            result = await agent.run("Say hello in three words.")
+        print(result.result.text)
+    finally:
+        unsubscribe()
+
+
+asyncio.run(main())
+```
+
+**接住 unsubscribe。** `subscribe_spendguard` 返回一个无参 callable,
+用来把 listener 从 agent 的 `Emitter` 上摘掉。这个适配器**不是**幂等的——
+在同一个 agent 上第二次调用 `subscribe_spendguard` 会装上第二个 listener,
+所以永远要在 `finally:` 块里调用返回的 `unsubscribe()`。
+
+## 工作原理
+
+BeeAI 的 `Emitter` 在层级化的 path 上发布事件,例如
+`agent.react.llm.<uuid>.start`、`.success`、`.error`。subscriber 在
+`agent.emitter.match` 上注册了一个 predicate,只要某个事件的 `name` 是
+`start` / `success` / `error`,且 `path` 里包含 `llm` 段,就会触发——
+这就覆盖了 `ReActAgent`、`Workflow`,以及任何在 `llm.*` 下发布事件的
+其他 agent。
+
+对每个 `start` 事件:
+1. handler 推导出一个稳定的、按调用维度的 key
+   (取 `EventMeta.path` 并去掉末尾的 `.start` 段),一个确定性的
+   `llm_call_id` + `decision_id`(在 `derive_uuid_from_signature` 下用
+   不同的 scope),以及一个 SpendGuard 的
+   `RequestDecision(LLM_CALL_PRE)` envelope。
+2. `client.request_decision(...)` 在任何 provider HTTP 之前就跑。返回
+   `CONTINUE` 时,会把 reservation 塞进一个有界 FIFO 的 inflight map
+   (上限 10 000 条,发生淘汰时只告警一次)。返回 DENY 时,
+   `DecisionDenied` 向上传播——BeeAI 的 `Emitter._invoke` 把它包成
+   `EmitterError` 并保留 `__cause__`,model 的 HTTP 根本到不了。
+3. 配对的 `success` 事件弹出 inflight 槽位,并用 provider 响应里真实的
+   `usage.total_tokens` 调用 `client.emit_llm_call_post(SUCCESS, total_tokens)`。
+4. `error` 事件弹出槽位并调用 `emit_llm_call_post(PROVIDER_ERROR, 0)`,
+   这样就会 release 掉 reservation,而不是丢给 TTL-sweep 去回收。
+
+## Claim estimator
+
+如果你不传 `claim_estimator=`,subscriber 会接入共享的
+`langchain_default_claim_estimator`,按从每个事件 payload 里抽出的实时
+`model_id` 做 key。借助内置的 tokenizer,它开箱就覆盖了 OpenAI /
+Anthropic / Gemini / Cohere / Llama 模型。
+
+要自定义行为,传一个 `(BeeAiStartEvent) → list[BudgetClaim]` 的
+callable 给 `claim_estimator=`:
+
+```python
+from spendguard.integrations.beeai import BeeAiStartEvent
+
+def my_estimator(ev: BeeAiStartEvent) -> list[common_pb2.BudgetClaim]:
+    # Project a flat 500-token reservation per call.
+    return [
+        common_pb2.BudgetClaim(
+            budget_id="my-budget",
+            unit=common_pb2.UnitRef(unit_id="usd_micros"),
+            amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )
+    ]
+
+unsubscribe = subscribe_spendguard(
+    agent, client,
+    budget_id="my-budget",
+    window_instance_id="my-window",
+    unit=unit,
+    pricing=pricing,
+    claim_estimator=my_estimator,
+)
+```
+
+## run_context 规则
+
+每个 BeeAI 的 `*.start` 事件**必须**在一个活跃的 `run_context(...)`
+块内触发。否则 handler 会抛 `RuntimeError`,带一条可操作的提示信息——
+把你的 `agent.run(...)` 调用包起来:
+
+```python
+async with run_context(RunContext(run_id=str(new_uuid7()))):
+    result = await agent.run("...")
+```
+
+`spendguard_run_context` 这个 ContextVar 在所有 SpendGuard 适配器之间
+**共享**(LangChain、Pydantic-AI、OpenAI Agents、Agno、DSPy、ADK、
+Strands、BeeAI)。一个包着 BeeAI agent 的父 LangChain run 会复用同一个
+`run_id`,不用显式地往下传。
+
+## 排错
+
+**`spendguard.integrations.beeai` 报 ImportError。** 你漏装了
+`[beeai]` extra。重装一下:
+
+```bash
+pip install 'spendguard-sdk[beeai]'
+```
+
+这个 extra 把版本钉在 `beeai-framework>=0.1.81,<0.2`——也就是撰写本文时
+PyPI 上实际的发布线(spec 里写的 `>=0.3,<1.0` 上限早于该项目以这个名字
+首次在 PyPI 发布;见 module docstring 里的 `DEVIATION-A`)。
+
+**`RuntimeError: subscriber fired outside an active run_context()`。**
+你在调用 `agent.run(...)` 时没有套 `async with run_context(...)`。
+每个顶层 run 都要绑一个全新的 `RunContext`(带一个新生成的 `run_id`)。
+
+**DEGRADE 行为。** 不会应用 mutation patch(和 LangChain / Pydantic-AI /
+Agno 对齐)。handler 会把 inflight 槽位塞好,然后放行这次调用;最终的
+`*.success` 会按预估的 envelope 提交 commit。
+
+## 不在范围内
+
+* **Tool-call 管控。** `subscribe_spendguard` 按事件 path 里有没有 `llm`
+  段来过滤;`tool.*` 这种 path 会落到 `integrations.agt` 那块去。
+* **流式过程中的管控。** `newToken` / `partialUpdate` 事件会被静默忽略;
+  commit 只在 `success` 时触发。
+* **TypeScript 适配器。** 按 build plan §2.3,Tier 3 只做 Python;TS
+  移植版延后。
+
+## 参考资料
+
+* Spec: [`docs/specs/coverage/D23_beeai/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D23_beeai)
+* Module: [`sdk/python/src/spendguard/integrations/beeai/`](https://github.com/m24927605/agentic-spendguard/tree/main/sdk/python/src/spendguard/integrations/beeai)
+* Demo: [`deploy/demo/agent_real_beeai/`](https://github.com/m24927605/agentic-spendguard/tree/main/deploy/demo/agent_real_beeai)

@@ -1,0 +1,289 @@
+---
+title: "Genspark 账单导入器(Super Agent — 仅对账)"
+description: >-
+  针对 Genspark Super Agent 管理端用量的事后导入器。SpendGuard
+  无法拦截 Genspark 的花费 —— Genspark 的 agent 循环完全跑在
+  它自己的云端 VM 里。导入器拉取 credit 消耗,经一份内置价格表
+  换算成预估 $,再产出带 reservation_source=subscription_meter /
+  import_source=genspark_team_api 标签的签名审计事件。
+sidebar:
+  badge:
+    text: Reconciliation only
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="SpendGuard 无法拦截 Genspark 花费 —— 只有 Genspark 能">
+  Genspark Super Agent 的 agent 循环跑在 Genspark 自己的云端
+  VM 里。客户的网络从头到尾都不经手 per-LLM-call 的 payload;
+  egress proxy + SDK adapter 什么都拦不到。Genspark
+  导入器**只做对账** —— 它事后拉取 credit
+  消耗,让 dashboard 上 CIO/CFO 的 single-pane-of-glass 视图
+  不至于缺一块,但它**不会**对 Genspark session 做 gate、限流或
+  short-circuit。那份契约属于 Genspark。
+  架构层面的推理见
+  [框架覆盖策略备忘录 Archetype IV](https://github.com/m24927605/agentic-spendguard/blob/main/docs/strategy/framework-coverage-2026-06.md)。
+</Aside>
+
+## 这是什么
+
+`spendguard-importer-genspark` crate(D16)是一个 Rust 二进制 +
+库,它会:
+
+1. 从 Genspark 管理端 API
+   (`/v1/admin/usage?workspace=…&from=…&to=…`)拉取用量 —— 用
+   `live` feature gate 起来,所以默认 build 不带 HTTP。
+2. 通过内置价格表把 **credits** 换算成预估 USD,价格表在
+   `services/importer_genspark/assets/genspark_credit_prices.json`。
+3. 产出带 `reservation_source=subscription_meter` 和
+   `import_source=genspark_team_api` 标签的签名
+   `spendguard.audit.import.genspark_credit` CloudEvents —— 它们和
+   D13 subscription-meter 行、D14 Devin 导入行落在同一块 dashboard
+   面上。
+
+默认的 merge gate 是**消毒过的 fixture 回放** —— 已提交的
+`tests/fixtures/genspark_usage.json` 快照。Live 模式需要 operator
+显式 opt-in。
+
+## Credit → $ 换算
+
+| Plan | 月费 $ | 月度 credit 额度 | `usd_per_credit` |
+|------|-----------|---------------------|-------------------|
+| **plus** | $19.99 | 10,000 | $0.001999/credit |
+| **pro** | $24.99 | 12,500 | $0.0019992/credit |
+| **premium** | $249.99 | 125,000 | $0.00199992/credit |
+
+换算是纯函数:以 micro-USD 为单位取
+`round(credits_consumed × usd_per_credit × 1_000_000)`,溢出时在
+`i64::MAX` 处饱和。换算那一刻价格表的
+`pricing_version` 会盖在每一条产出行上 —— 事后回改费率文件**不会**重写
+历史审计行。
+
+### 未知 plan 的兜底
+
+如果 Genspark API 返回的 plan slug **不在**内置价格表里(比如未来某个
+`"enterprise"` 档,或窗口中途改了名),导入器会把这一行以
+`amount_micro_usd = 0` 产出,并盖上
+`reason_code = "genspark_plan_unknown"`。Dashboard 必须把
+**"费率未知"**和**"零花费"**区分开 —— credit 字段照样填满,所以即便
+美元映射未知,operator 也能看到 Genspark 的消耗量。这两个字段总是一起
+设置;只设其一,要么会悄悄定错价(看得见非零 USD 却没有费率),要么让
+dashboard 拿不到任何信号。
+
+## 安装
+
+### Fixture 模式(默认 merge gate)
+
+<div is:raw>
+
+```bash
+cargo run -p spendguard-importer-genspark --bin importer_genspark -- \
+    --mode fixture \
+    --fixture services/importer_genspark/tests/fixtures/genspark_usage.json \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+</div>
+
+二进制会为每条记录打一个 CloudEvent 到 stdout;demo runner 脚本
+(`deploy/demo/import_genspark_fixture_demo.sh`)把 INSERT
+路径接到 demo postgres 上。
+
+### Live 模式(operator opt-in)
+
+<div is:raw>
+
+```bash
+export GENSPARK_API_TOKEN=<Admin API token, at least 32 chars>
+export GENSPARK_API_BASE_URL=https://api.genspark.ai/v1   # optional override
+
+cargo run -p spendguard-importer-genspark --features live --bin importer_genspark -- \
+    --mode live \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+</div>
+
+`live` feature 只拉带 `rustls-tls` 的 `reqwest`(不带
+`native-tls`,不带 `openssl-sys`),用 30s 的 per-request 超时
+外加有上限的指数退避(cap:1 小时)来扛住限流。
+
+针对 `GENSPARK_API_TOKEN` 的运行时 gate 在启动时做三项检查,各自报不同的
+错误信息,方便 operator 排查:
+
+1. **Missing** —— 环境变量没设。
+2. **Empty** —— 环境变量设了,但 trim 掉空白后是空的。
+3. **Too short** —— 值不足 32 个字符(用来挡 `"TODO"` /
+   `"changeme"` 这类占位符)。
+
+把 token 的权限**只**收到 **Genspark Admin Usage API** 这一个 scope ——
+最小权限。
+
+## 幂等性
+
+重跑同一个窗口不会重复产出。CloudEvent 的
+`event.id` 是由
+`(workspace_id, task_id, window_end)` 推导出的确定性 UUIDv5;canonical_ingest
+通过已有的 `event_replay_dedup` 表去重。
+
+demo 你想重跑多少遍都行:
+
+<div is:raw>
+
+```bash
+make -C deploy/demo demo-verify-import-genspark-fixture
+make -C deploy/demo demo-verify-import-genspark-fixture   # idempotent; 0 new rows
+```
+
+</div>
+
+## CloudEvent 示例
+
+<div is:raw>
+
+```json
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.genspark_credit",
+  "source": "spendguard-importer-genspark",
+  "id": "018f4a3a-d971-7c16-91fe-d0169e715ba0",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/demo/genspark/workspace/FAKE_ws_001/task/FAKE_task_001",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "demo",
+    "budget_id": "genspark-budget",
+    "workspace_id": "FAKE_ws_001",
+    "task_id": "FAKE_task_001",
+    "plan": "plus",
+    "credits_consumed": 3200.0,
+    "usd_per_credit": 0.001999,
+    "amount_micro_usd": 6396800,
+    "reason_code": null,
+    "pricing_version": "genspark-credit-v1-2026-06",
+    "window_start": "2026-06-01T00:00:00Z",
+    "window_end": "2026-06-01T01:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "genspark_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "fd2c0bb772bfbf2605ce09204aed0025cd754c3edce7296ee281637e5a52baf6",
+    "task_category": "research"
+  }
+}
+```
+
+</div>
+
+## 价格表示例
+
+<div is:raw>
+
+```json
+{
+  "pricing_version": "genspark-credit-v1-2026-06",
+  "effective_from": "2026-06-01T00:00:00Z",
+  "currency": "USD",
+  "rates": [
+    { "plan": "plus",    "monthly_usd": 19.99,  "monthly_credits": 10000,  "usd_per_credit": 0.001999 },
+    { "plan": "pro",     "monthly_usd": 24.99,  "monthly_credits": 12500,  "usd_per_credit": 0.0019992 },
+    { "plan": "premium", "monthly_usd": 249.99, "monthly_credits": 125000, "usd_per_credit": 0.00199992 }
+  ]
+}
+```
+
+</div>
+
+## 为什么我们做不了 gate
+
+Genspark Super Agent 的循环**完全跑在 Genspark 自己的云端
+VM 里**。客户的 egress proxy 永远看不到 LLM API 调用的 payload ——
+Genspark 的 VM 是从它自己的网络边界内拨向 OpenAI / Anthropic /
+其他 provider 的。管理端 API 只暴露事后的 credit 聚合,没有任何 pre-call
+hook。
+
+这就是 SpendGuard 框架覆盖分析里的 **Archetype IV**:一个完全托管的云端
+agent,客户对网络零可见性。唯一可行的集成方式就是对账 —— 事后把账单拉下来,在
+dashboard 上呈现,在跨越阈值时告警。除非 Genspark
+拿出 pre-call webhook,否则 gate 在架构上根本不可能。
+
+## Operator 调度
+
+导入器是个**周期性 worker**,不是 daemon。用 cron、Kubernetes CronJob
+或你环境里任何能调度的东西把它跑起来:
+
+<div is:raw>
+
+```yaml
+# Kubernetes CronJob example — pull every hour.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: spendguard-importer-genspark
+spec:
+  schedule: "0 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: importer
+              image: ghcr.io/m24927605/agentic-spendguard/importer-genspark:latest
+              env:
+                - name: GENSPARK_API_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: genspark-admin-token
+                      key: token
+              args:
+                - --mode=live
+                - --tenant=$(SPENDGUARD_TENANT_ID)
+                - --budget=$(SPENDGUARD_BUDGET_ID)
+          restartPolicy: OnFailure
+```
+
+</div>
+
+## 你在 dashboard 上看到什么
+
+* 每个 task、每个 workspace 的预估 $ —— 用
+  `pricing_version` 打标。
+* 消耗的 credits(永远有,未知 plan 的行也有)。
+* `reservation_source = subscription_meter` 过滤器把 Genspark
+  花费和 Devin、Claude Code Pro / Codex
+  subscription-meter 行归到一起(这些是跳过 BYOK ledger 的 advisory 行)。
+* Plan 级别的 pivot:`plus` vs `pro` vs `premium` vs 未知。
+* 当 vendor 填了 task category 时,按它拆分(`research` /
+  `code_generation` / …)。
+
+## 实现索引
+
+* Crate 脚手架 + Cargo.toml:
+  `services/importer_genspark/Cargo.toml` —— 排除在 workspace 外,
+  `publish = false`,`live` feature gate 起来。
+* 纯换算:
+  `services/importer_genspark/src/import_record.rs`
+  (`import_record_to_audit_row`)—— 无 I/O,不读时钟。
+* 价格表:
+  `services/importer_genspark/src/credit_price_table.rs` ——
+  饱和运算,拒绝 NaN/Infinity/负数输入。
+* CloudEvent builder:
+  `services/importer_genspark/src/cloudevent_envelope.rs` ——
+  通过 `tests/golden/cloudevent_v1alpha1_*.json` 做 golden 测试。
+* Fixture loader:
+  `services/importer_genspark/src/fixture_loader.rs` ——
+  在 parse 时硬拒非 synthetic 的 ID(T9)。
+* Live client:
+  `services/importer_genspark/src/live/client.rs` —— 仅 rustls 的
+  `reqwest` wrapper,带类型化的 401/403/429/5xx 错误,外加严格的
+  三路 token gate(missing / empty / too-short)。
+* Migration:
+  `services/ledger/migrations/0061_import_source_widen_genspark.sql` ——
+  把已有的 `audit_outbox.import_source` CHECK 放宽,纳入
+  `genspark_team_api`。
+
+完整的设计推理 + slice 级拆解见
+[`docs/specs/coverage/D16_genspark_importer/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D16_genspark_importer/design.md)。

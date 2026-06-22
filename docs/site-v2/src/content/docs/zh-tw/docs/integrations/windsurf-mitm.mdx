@@ -1,0 +1,201 @@
+---
+title: "Windsurf IDE MITM codec — EXPERIMENTAL,僅限 SOW"
+description: >-
+  逆向工程出來的 gRPC-Web codec,讓 SpendGuard 能在 Windsurf IDE
+  Cascade session 上插入 budget reservation。EXPERIMENTAL,只開放給
+  簽了維護附約的 Enterprise SOW 客戶。只要 Codeium 改 wire protocol,
+  codec 就會壞掉,客戶自行承擔 break-window 風險。請勿放進 GA CONFIG
+  出貨。
+sidebar:
+  badge:
+    text: Experimental
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="EXPERIMENTAL — 僅限 SOW">
+  **請勿當成 GA 功能出貨。** 這個整合只開放給簽了維護附約的
+  Enterprise SOW 客戶。只要 Codeium 改了 wire protocol,codec 就會壞。
+  客戶在 SOW 裡明確接受 break-window 風險。完整的法務立場請看 repo 裡的
+  [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/SOW.md)。
+</Aside>
+
+> **法務立場。** 這個 codec 做的是
+> **逆向工程的互通(reverse-engineered interoperability)**。
+> [`PROTOCOL.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/PROTOCOL.md)
+> 裡記錄的 wire format 是從 Windsurf binary 外部觀察得來的,完全沒有
+> 包含任何 vendor 的原始程式碼。啟用這個 codec 的 SpendGuard 客戶,
+> 都是在 Enterprise SOW 之下使用,而該 SOW 明確認知到:(a) 只要
+> Codeium 改 wire protocol,codec 隨時可能壞掉;(b) 客戶有責任自行確認
+> 自家的 Windsurf / Codeium 服務條款允許對 outbound 流量做 on-host
+> MITM。
+
+## 為什麼 Windsurf IDE 需要一個專屬 adapter
+
+Windsurf IDE 的 managed Cascade 模式**不會**去呼叫 `api.openai.com`
+或 `api.anthropic.com`。它走的是 `server.codeium.com` 和
+`windsurf-server.codeium.com`,用 private gRPC-Web 載著 Codeium 自家
+專有的 Cascade envelope。SpendGuard 標準的那幾種 adapter(model
+middleware、base-URL swap、OpenAI 相容的 egress proxy)根本看不到這些
+訊息 — wire bytes 是 Codeium 內部的 protobuf,不是 OpenAI 的 JSON。
+
+那些在全公司規模部署 Windsurf、又想對 Cascade session 做 SpendGuard
+budget gating 的 SOW 客戶,願意拿 codec-break 的風險換取整個 session
+的完整覆蓋。
+
+## codec 到底做了什麼
+
+```
+Windsurf IDE ──TLS→ SpendGuard egress proxy (D02 leaf w/ server.codeium.com SAN)
+                       │
+                       ├─ if Host == server.codeium.com AND feature `windsurf-mitm-experimental`
+                       │                                AND env `SPENDGUARD_EXPERIMENTAL_CODECS=1`
+                       │     │
+                       │     ▼
+                       │  services/windsurf_codec
+                       │     ├─ framing::GrpcWebReader  → DecodedFrame
+                       │     ├─ version::is_known       → fail-closed on unknown stamp
+                       │     ├─ envelope::CascadeRequest::decode → CascadeRequest
+                       │     ├─ translate::to_openai → CanonicalRequest
+                       │     │    └→ ledger::reserve → reservation_id
+                       │     ├─ upstream HTTPS to server.codeium.com (byte-perfect tee)
+                       │     ├─ envelope::CascadeResponseDelta::decode (server-streaming)
+                       │     ├─ translate::to_openai_chunks → CanonicalResponseChunks
+                       │     │    └→ ledger::commit_estimated / release
+                       │     └─ passthrough: byte-for-byte (codec never mutates wire bytes)
+                       │
+                       └─ else: D02 default pass-through (no codec)
+```
+
+這個 codec 是掛在 workspace 的 feature flag
+`windsurf-mitm-experimental` 之下出貨的。預設的 build 根本不會編譯
+codec crate;你必須在 egress-proxy 和 CLI consumer 兩端明確開啟這個
+feature,**而且**還要設環境變數 `SPENDGUARD_EXPERIMENTAL_CODECS=1`。
+
+## 四個大聲的 "EXPERIMENTAL" 標記
+
+依照
+[`design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D18_windsurf_mitm/design.md)
+§3,codec 任何時候都掛著四個高調的標記。reviewer 會直接 reject 任何把
+其中任一個拿掉的 diff。
+
+1. **Cargo manifest:**
+   [`services/windsurf_codec/Cargo.toml`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/Cargo.toml)
+   帶著 `[package.metadata.experimental]`,裡面是這串一字不差的 `reason`
+   字串 `Reverse-engineered Windsurf / Codeium Cascade wire
+   protocol. Breaks on vendor release.`
+2. **Stderr banner:** 每個 codec 的 public entry point 都會呼叫
+   `assert_experimental_banner_emitted()`,在每個 process 第一次使用時
+   把這段印到 stderr:
+   ```
+   [EXPERIMENTAL] windsurf-mitm codec active. Vendor protocol:
+   undocumented. Support tier: SOW only. SOW:
+   services/windsurf_codec/SOW.md. DO NOT SHIP IN GA CONFIG.
+   ```
+3. **雙通道 opt-in:** `SPENDGUARD_EXPERIMENTAL_CODECS=1`(環境變數)
+   **和** `[experimental.windsurf_codec] enabled = true`
+   (`spendguard.toml`)兩個都要。只開其中一個是不夠的。
+4. **SOW 附約文件:**
+   [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/SOW.md)
+   在開頭最顯眼處標著 `Status: EXPERIMENTAL — SOW only`,front-matter
+   裡有 `noindex: true`,並把那句 `DO NOT SHIP AS A GA FEATURE` 直接當成
+   top-level callout 放上去。
+
+## Break-Window SLA
+
+SOW 附約會把這些欄位填好:
+
+| 欄位 | 客戶端的值 |
+|-------|---------------------|
+| Codec 壞掉的偵測 window | 通常在 Codeium 發布後 ≤24 小時內 |
+| Codec 修復的時程目標 | 通常 ≤5 個工作天 |
+| 客戶端 escalation 聯絡窗口 | on-call channel |
+| SpendGuard escalation 聯絡窗口 | SpendGuard customer-success on-call |
+| 測過的 Windsurf client 版本範圍 | 交付當下的 Windsurf IDE 最低/最高版本 |
+| 測過的 Cascade wire-version 範圍 | 預設:`cascade.v2.0`、`cascade.v2.1` |
+
+codec 一旦壞掉,SpendGuard 會重新擷取最新的 Cascade wire bytes(依照
+客戶自己的 on-host 擷取流程),更新 proto description 和 fixture
+corpus,再重新發布一版掛 feature-flag 的 build。客戶則在自家的
+change-management window 內重新部署。
+
+## Sealed-secret 憑證模型
+
+客戶的 Windsurf / Codeium session bearer token 對 codec 來說是
+end-to-end 不透明的。它們從 Windsurf IDE binary 原封不動地流到
+`server.codeium.com`;codec **不會**解密、不會 log、也不會持久化這些
+token。audit chain 會依照 POST_GA_03 的 tenant 遮罩政策,把
+`model_name` / `max_tokens` 以外的 message-body 欄位通通遮掉。
+
+codec 的測試套件會擋住任何下列憑證前綴外洩進 committed 的 fixture
+payload:
+
+- `sk-codeium-`
+- `wsf_`
+- `codeium_pat_`
+- `cdm_`
+
+codec 不會引入任何新的長期 secret。只要把 leaf cert 的 SAN 為這個 SOW
+部署擴充上去,D02 的 trust store 就涵蓋了 `server.codeium.com`。
+
+## Operator 威脅模型
+
+這個 codec 是 **best-effort gating**,不是硬性的 policy gate。當 codec
+看不懂 wire shape(因為 Codeium 改了它),egress proxy 會
+**送出 `decoder_skipped` 並讓這個呼叫直接通過**。這跟 codec 碰到不認識
+的 Cascade model 字串時採取的立場一樣。失敗會很大聲(decode-error
+metric + stderr banner + 結構化 log),但它**不會**擋住客戶的 Cascade
+session。
+
+當 wire-version stamp 落在 registry 之外(不認識的 Cascade 版本),
+codec 會在 decode 邊界 fail **closed**,回 `windsurf_wire_version_unsupported`
+— 這個 request **不會**被轉發出去;IDE 會看到一個 synthetic 503。
+
+完整的威脅模型表格在
+[`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/SOW.md)
+§4。
+
+## Demo
+
+有一個 fixture-based 的 demo,拿六個合成的 `.windsurf-rpc` fixture
+(simple / tool calls / long streaming / error response / unknown wire
+version / truncated body)從頭到尾證明 codec 的正確性。這個 demo
+**不會**啟動 Windsurf IDE binary,也**不會**碰到 `server.codeium.com`:
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=windsurf_mitm_fixture
+```
+
+這個 demo 的
+[`README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/windsurf_mitm_fixture/README.md)
+記錄了整條分層 pipeline(framing decode → version gate → envelope
+decode → translation → mock sidecar reserve+commit → byte-for-byte
+preservation → counting-stub POST),以及它跟一個假想的「啟動 Windsurf
+binary」demo 之間的差異。
+
+客戶實際部署時,會用自己驗證過的擷取路徑,拿同一個 codec 去跑真實的
+Cascade 流量。這個 demo 則是把 codec 抽離出來、單獨證明它的正確性。
+
+## 限制
+
+- **真實的 Windsurf 流量不進 CI。** 只有錄好的 fixture。真實擷取的證據
+  存在 SOW 客戶端的 artifact 裡。
+- **不涵蓋 Windsurf 的非 Cascade 介面。** Tab 自動補全和 inline diff
+  不在範圍內;只有 managed-Cascade 這個介面會做 gating。
+- **不涵蓋 Codeium 獨立 client。** 只覆蓋 Windsurf IDE Cascade。純
+  Codeium 的 API client 走的是另一套上游模式。
+- **body-decode 失敗時採 best-effort gating。** 在已知 wire version 上
+  碰到不認識的 body shape,會送出 `decoder_skipped` 然後放行;codec
+  會很大聲地講出來,但它不會擋住客戶的 Cascade session。
+- **wire-version 漂移時採 fail-closed gating。** 不認識的 wire version
+  (落在 registry 之外)會回 503 並帶 `windsurf_wire_version_unsupported`
+  — 跟 body-decode 失敗那條路徑不一樣。
+- **Cursor codec 是另外一個 D17** — 不在 D18 範圍內。
+
+## 相關文件
+
+- [Quickstart](../../quickstart/) — 5 分鐘把整個 SpendGuard stack 跑起來
+- [Contract YAML reference](../../contracts/yaml/) — 撰寫 allow/stop 規則
+- Cursor IDE MITM codec(另外的 D17):[Cursor MITM](../cursor-mitm/)
+- 其他 adapter 整合:[Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [Kong AI Gateway](../kong-ai-gateway/) · [Dify](../dify/) · [LiteLLM SDK shim](../litellm-sdk-shim/)

@@ -1,0 +1,219 @@
+---
+title: "Anthropic claude-agent-sdk — egress proxy recipe"
+description: >-
+  SpendGuard 是透過 egress proxy 加上一張受信任的 root CA 來攔截 Anthropic
+  的第一方 claude-agent-sdk（Python + TS），而不是靠 SDK callback。這個
+  SDK 會把 claude CLI 開成子行程，所以 LLM 呼叫其實是發生在 CLI 行程裡面；
+  PreToolUse 的範圍是工具層級，不是 LLM 層級。egress proxy 才是唯一的
+  LLM 層級閘門。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="PreToolUse 不是 LLM 層級的閘門">
+  `claude-agent-sdk` 有提供一個 **`PreToolUse`** hook。這個 hook 是在
+  工具呼叫（Bash、Edit、Read）時觸發 — **而不是**在底層的
+  `messages → response` 往返時觸發。如果你想讓 SpendGuard 去攔截 LLM
+  呼叫本身，**egress proxy** 加上 **D02 root-CA 安裝**是唯一的路。千萬
+  不要把預算上限掛成 `PreToolUse` hook 就以為大功告成 — 等下一個工具
+  觸發時，模型呼叫早就已經離開行程了。
+</Aside>
+
+> [Anthropic 的 `claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-python)
+> 是 Anthropic 唯一出的第一方 agent SDK。它的設計蠻特別的：這個 SDK
+> 會**把 `claude` CLI binary 開成子行程**去跑 agent loop，所以每一個
+> `messages` request 都是從 CLI 行程裡面以 HTTPS 呼叫的形式離開，而不是
+> 從 Python（或 Node）行程出去。SpendGuard 攔它的方式，跟攔任何一個會
+> 認 HTTPS 設定的 CLI 完全一樣：一個架在 `localhost:9000` 的 forward
+> proxy，加上一張 CLI 會接受的受信任 root CA。D02 的 `spendguard install`
+> 這一步兩件事都幫你處理好了。
+
+## 為什麼沒有專屬的 SDK adapter
+
+SDK 的 `PreToolUse` hook 是**工具層級**的：它是在 agent 決定要用某個工具
+（`Bash`、`Edit`、`Read`、`WebFetch`）時才跑。它**看不到**底層的
+`POST /v1/messages` request。等到 `PreToolUse` 為了下一個工具觸發時，LLM
+早就已經呼叫過了，token 也已經算錢了，模型的回應也早就產生了。
+
+所以在 SDK 這一層，根本沒有什麼東西可以包起來、能真正把那一塊錢攔下來。
+誠實的閘門在下面一層 — 也就是 CLI 會認 `HTTPS_PROXY` 跟
+`NODE_EXTRA_CA_CERTS` 的那個 HTTPS 邊界。這個邊界正是 D02 已經幫你設定
+好的、也是 SpendGuard egress proxy 已經在做 TLS 終結的地方。Anthropic 的流量會
+走 proxy 既有的 per-provider route（[`routing.rs`](https://github.com/m24927605/agentic-spendguard/blob/main/services/egress_proxy/src/routing.rs)）。
+D30 就是把這一切串起來的 recipe。
+
+## 閘門怎麼運作
+
+```
+your code (Python or TypeScript)
+    uses claude_agent_sdk / @anthropic-ai/claude-agent-sdk
+         │  subprocess
+         ▼
+    `claude` CLI binary (Node)
+         │  HTTPS_PROXY=http://localhost:9000
+         │  NODE_EXTRA_CA_CERTS=<spendguard CA>
+         ▼
+    SpendGuard egress proxy  ── route: api.anthropic.com/v1/messages
+         │
+         │  PRE: sidecar RequestDecision → CONTINUE / STOP
+         │  ↳ forward to api.anthropic.com
+         │  POST: sidecar ConfirmPublishOutcome (commit_estimated)
+         ▼
+    audit_outbox: one RESERVE_RESPONSE row + one matching COMMIT_OUTCOME row
+```
+
+CLI 是那個 HTTPS client。egress proxy 才是閘門。`audit_outbox` 的那幾筆
+row 把整條稽核鏈收尾。
+
+## 前置條件
+
+- 一個跑起來的 SpendGuard egress proxy，架在 `http://localhost:9000`。
+  [Quickstart](../../quickstart/) 可以在 5 分鐘內把整套 stack 拉起來。
+- 這台主機上 `spendguard install` 有乾淨跑過（D02）。CLI 安裝程式會把
+  SpendGuard root CA 放進作業系統的信任儲存區，並且把 `HTTPS_PROXY` +
+  `NODE_EXTRA_CA_CERTS` 寫進你的 shell rc。
+- 一把放在 `ANTHROPIC_API_KEY` 裡的 Anthropic API key。這個 recipe 只走
+  BYOK — [Claude Code Pro / Max 訂閱計量](../subscription-meter/)是另一個
+  獨立的整合。
+- Python 的話：Python 3.11 或更新。TypeScript 的話：Node.js 20 或更新。
+
+## Recipe — Python
+
+```bash
+pip install claude-agent-sdk
+
+# spendguard install already wired your shell. Verify:
+echo "$HTTPS_PROXY"      # → http://localhost:9000
+echo "$NODE_EXTRA_CA_CERTS"  # → /etc/ssl/spendguard/ca.crt (or your platform path)
+```
+
+```python
+# examples/claude-agent-sdk/example.py
+import anyio
+from claude_agent_sdk import query, ClaudeAgentOptions
+
+PROMPT = "List two ways to reverse a string in Python in under 30 words."
+
+async def main() -> None:
+    async for msg in query(
+        prompt=PROMPT,
+        options=ClaudeAgentOptions(model="claude-sonnet-4-5", max_turns=1),
+    ):
+        print(msg)
+
+if __name__ == "__main__":
+    anyio.run(main)
+```
+
+把它跑起來。CLI 子行程會從你的 shell 環境繼承 `HTTPS_PROXY`，所以那個
+`messages` 呼叫就會流經 SpendGuard egress proxy。proxy 會在 `audit_outbox`
+寫出一筆 `RESERVE_RESPONSE` row 跟一筆相對應的 `COMMIT_OUTCOME` row —
+用下面 [驗證 SpendGuard 有攔到這次呼叫](#verifying-spendguard-captured-the-call)
+裡的 SQL 來確認。
+
+## Recipe — TypeScript
+
+```bash
+npm install @anthropic-ai/claude-agent-sdk
+
+echo "$HTTPS_PROXY"           # → http://localhost:9000
+echo "$NODE_EXTRA_CA_CERTS"   # → /etc/ssl/spendguard/ca.crt (or your platform path)
+```
+
+```ts
+// example.mjs
+import { query } from "@anthropic-ai/claude-agent-sdk";
+
+const PROMPT = "List two ways to reverse a string in Python in under 30 words.";
+
+for await (const msg of query({
+  prompt: PROMPT,
+  options: { model: "claude-sonnet-4-5", maxTurns: 1 },
+})) {
+  console.log(msg);
+}
+```
+
+TypeScript SDK 跟 Python SDK 的形狀一模一樣，底層用的也是同一個 `claude`
+CLI binary。兩邊都會認 `HTTPS_PROXY` 跟 `NODE_EXTRA_CA_CERTS`，也都會產生
+一樣的稽核鏈 row。
+
+<h2 id="verifying-spendguard-captured-the-call">驗證 SpendGuard 有攔到這次呼叫</h2>
+
+一次 `query(...)` 跑完之後，SpendGuard 已經往 `audit_outbox` 寫了兩筆
+row — 一筆是 PRE 時的 `RESERVE_RESPONSE`，一筆是 POST 時的
+`COMMIT_OUTCOME`，兩筆共用同一個 `request_id`。直接查它們來確認：
+
+```sql
+SELECT
+    payload->>'event_type'           AS event_type,
+    payload->>'provider'             AS provider,
+    payload->>'model'                AS model,
+    payload->>'committed_input_tokens'  AS input_tokens,
+    payload->>'committed_output_tokens' AS output_tokens,
+    payload->>'request_id'           AS request_id
+FROM audit_outbox
+WHERE payload->>'provider' = 'anthropic'
+  AND payload->>'model' LIKE 'claude-%'
+ORDER BY created_at DESC
+LIMIT 2;
+```
+
+這次呼叫應該剛好會看到兩筆 row：一筆是 `event_type = RESERVE_RESPONSE`
+（呼叫前的 reservation），一筆是 `event_type = COMMIT_OUTCOME`（呼叫後的
+commit） — 兩筆都帶同一個 `request_id`，而且 commit 那筆的
+`committed_input_tokens > 0`、`committed_output_tokens > 0`。SpendGuard
+dashboard 也會在
+[Operations → Dashboard](../../operations/dashboard/) 把同樣的 row 攤出來給你看。
+
+<h2 id="what-pretooluse-is--and-is-not">`PreToolUse` 是什麼 — 又不是什麼</h2>
+
+`PreToolUse` 是 agent 準備要**呼叫某個工具**（`Bash`、`Edit`、`Read`、
+`WebFetch`、自訂的 MCP 工具）時觸發的 SDK hook。它**不會**在底層的 LLM
+呼叫時觸發。這個區別對預算控管來說很關鍵：
+
+- 一個會擋掉昂貴工具的 `PreToolUse` hook，是**工具策略**的閘門。它擋得住
+  `Bash("rm -rf /")` 或 `WebFetch("https://...")`。要把「這個 agent 不准
+  跑程式碼」或「這個 agent 不准呼叫這個網域」這種規則寫進去，這裡正是對的
+  地方。
+- 一個想拿來強制執行預算的 `PreToolUse` hook，根本就是**自欺欺人**。等下
+  一個工具觸發時，LLM 早就回應過了。token 也已經算錢了。這個 hook 沒辦法
+  把那個產生 tool-use 決策的 messages 往返倒帶回去。
+
+要做 LLM 層級的攔截 — 也就是 SpendGuard 呼叫前的 reservation 真正能省到
+錢的地方 — 架在 `api.anthropic.com/v1/messages` 的 egress proxy 才是唯一
+正確的施作點。本頁的 recipe 假設這個施作點已經透過 D02 就定位了。
+
+## 疑難排解
+
+- **CLI 子行程丟出 `ssl.SSLCertVerificationError`。** SpendGuard root CA
+  沒有進到 CLI 在讀的那個信任儲存區。重跑一次 `spendguard install`；在
+  Linux 上確認 `update-ca-certificates` 有跑到；在 macOS 上確認憑證有透過
+  `security add-trusted-cert` 加進系統 keychain。在 Node 上，確認
+  `NODE_EXTRA_CA_CERTS` 指到的是一個目前使用者讀得到的 PEM 檔。
+- **呼叫直接打到 `api.anthropic.com` — 沒有任何稽核 row。** 你目前這個
+  shell 沒有吃到 `spendguard install` 寫進去的那段 rc snippet。開一個全新
+  的終端機，或是 `source ~/.zshrc` / `~/.bashrc`，然後再 `echo "$HTTPS_PROXY"`
+  檢查一次。如果你是從 IDE 啟動 SDK 的，重開 IDE 讓它繼承到更新後的環境。
+- **`HTTPS_PROXY` 有設，但 `NODE_EXTRA_CA_CERTS` 是空的。** 這個 CLI 是
+  Node 寫的，它會拿 proxy 的 leaf cert 去比對 Node 自己內建的 CA 清單。
+  少了 `NODE_EXTRA_CA_CERTS`，連線就會以 `unable to verify the first
+  certificate` 失敗。兩個環境變數都得設；`spendguard install` 兩個都會設。
+- **`PreToolUse` 擋掉了一個工具，可是 LLM 呼叫還是發生了。** 這是設計如
+  此 — 參考 [`PreToolUse` 是什麼 — 又不是什麼](#what-pretooluse-is--and-is-not)。
+  把預算上限搬到 egress proxy（也就是這個 recipe）。
+
+## 相關連結
+
+- [Quickstart](../../quickstart/) — 5 分鐘把整套 SpendGuard stack 拉起來。
+- [Drop in 14 tools (overview)](../../drop-in/) — 給其他 OpenAI 相容
+  CLI 跟 IDE 的 Pattern 2 快速套路。
+- [Subscription-tier meter](../subscription-meter/) — 給 Claude Code
+  Pro / Max 方案用的（這個 BYOK recipe 不涵蓋）。
+- [Operations → Dashboard](../../operations/dashboard/) — 找出你這次跑的
+  稽核鏈 row。
+- Anthropic 上游：
+  [`claude-agent-sdk-python`](https://github.com/anthropics/claude-agent-sdk-python) ·
+  [`claude-agent-sdk-typescript`](https://github.com/anthropics/claude-agent-sdk-typescript)。
+- 可直接跑的範例：
+  [`examples/claude-agent-sdk/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/claude-agent-sdk)。

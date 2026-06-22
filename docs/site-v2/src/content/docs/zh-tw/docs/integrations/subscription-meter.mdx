@@ -1,0 +1,143 @@
+---
+title: "訂閱方案計量器(Claude Code Pro + ChatGPT Plus 上的 Codex)"
+description: >-
+  針對固定月費訂閱方案的盡力而為計量器:這種情況下 SpendGuard
+  沒辦法真的擋住金額(供應商在內部自行結算),但可以估算零售
+  美元、在軟性上限觸發告警,也可以選擇用一個合成的 429
+  硬性上限直接短路掉請求。
+sidebar:
+  badge:
+    text: Advisory
+    variant: note
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="這是計量,不是強制執行">
+  Anthropic / OpenAI 的訂閱額度是在**內部**結算的。這個計量器
+  只是一個以零售 token 單價為基礎的估算性參考值 —— 在沒有真正
+  BYOK 帳本紀錄的前提下,這已經是 SpendGuard 能最貼近實際金額的
+  做法了。等到各家供應商推出 Admin Usage API,真正的對帳會沿用
+  完全相同的這份稽核列(audit row)結構。
+</Aside>
+
+## 為什麼我們沒辦法真的擋住金額
+
+Claude Code Pro/Max 跟 ChatGPT Plus/Pro 上的 Codex 走的是 OAuth
+訂閱。流量一樣會打到 `api.anthropic.com/v1/messages` 跟
+`chatgpt.com/backend-api/codex/responses`,所以 proxy 看得到這些
+呼叫 —— 但 Anthropic 跟 OpenAI 是拿這些用量去沖那筆固定月費、在
+內部結算的。如果 SpendGuard 的 BYOK 帳本把每個 token 都照零售
+單價記帳,等於是在 $20/mo 的方案之上又憑空多算了一筆幽靈金額。
+
+所以 **subscription_meter** 模式改成這樣做:
+
+* 在開啟帳本交易**之前**,先把每個請求分類成 BYOK 或訂閱。
+* 對訂閱請求,只跑一個**純計量估算**(tokens × 零售單價 ÷ 1M),
+  並在稽核列上標記 `reservation_source = subscription_meter`。
+* `ledger_entries` 跟 `reservations` 兩邊都不寫 —— 計量列本身就是
+  那筆正式紀錄。
+
+## 三種模式
+
+| 模式        | 預設 | 行為                                              |
+|-------------|:-------:|--------------------------------------------------------|
+| `meter`     |   ✅    | 只做估算;不告警,也不阻擋。                     |
+| `soft_cap`  |        | 在 `alert_at_atomic` 發出 `subscription_soft_cap_alert`;CONTINUE。 |
+| `hard_cap`  |        | 到 `hard_cap_at_atomic` 時,短路成 DENY + 合成 429。 |
+
+模式是逐租戶設定的,透過 `subscription_caps` 表來管(支援 cap 的
+SQL 會在下一個 slice 進來;目前 sidecar 是從
+`DecisionRequest.runtime_metadata.subscription` 讀門檻值)。
+
+## 分類
+
+分類器要**兩個**訊號都對上,才會把一個請求標記為訂閱:
+
+| 訊號 | Claude Code Pro | Codex / ChatGPT-OAuth |
+|--------|------------------|------------------------|
+| `Authorization` 前綴 | `sk-ant-oat01-…` | `eyJ…`(JWT header) |
+| `User-Agent` | `claude-cli/<ver>` 或 `claude-code/<ver>` | `codex_cli_rs/<ver>` |
+| BYOK 區分子 | `sk-ant-api03-…` | `sk-proj-…` / `sk-…` |
+
+光看 UA 是可以偽造的(實務上一堆人就是拿 `claude-cli` 配 BYOK
+金鑰在用);光看 token 也不夠,因為 OAuth token 比 CLI 執行檔更
+容易外洩。兩個都要對上才算 —— 細節看
+[`classifier.rs`](https://github.com/m24927605/agentic-spendguard/blob/main/services/sidecar/src/subscription_meter/classifier.rs)。
+
+## 硬性上限的合成 429
+
+當 `hard_cap` 模式開著、而且預估的計量用量越過了
+`hard_cap_at_atomic`,sidecar 會趕在帳本之前先把請求短路掉:
+
+```json
+{
+  "error": {
+    "type": "rate_limit_exceeded",
+    "message": "spendguard subscription cap reached",
+    "code": "spendguard_subscription_cap"
+  }
+}
+```
+
+這個結構是**對齊供應商格式**的,所以 claude-cli / codex_cli_rs 會
+把它當成供應商自己的 429 來處理、乾淨地退出。特地用了一個不一樣的
+`code = "spendguard_subscription_cap"`,讓維運人員在他們的儀表板上
+能分得出來:這個 429 是 SpendGuard 注入的,還是供應商注入的。
+
+`Retry-After` 上限壓在 86 400 秒(24 小時)—— 這是為了保護 CLI,
+免得某個設錯的上限視窗叫它們等超過一天。
+
+## Migration 與 schema
+
+D13 出三支純新增(additive)的 migration:
+
+* `0044_subscription_meter.sql` —— `subscription_meters` 表 +
+  `audit_outbox.reservation_source` 欄位。
+* `0045_subscription_alerts.sql` —— `subscription_alerts` 表,帶
+  冷卻(cooldown,預設 1 小時,跟 `stats_aggregator` 的 drift_alert
+  一致)。
+* `0046_subscription_importer.sql` —— `subscription_import_jobs`
+  表 + `audit_outbox.import_source` 欄位。
+
+三支都有開 RLS,套用標準的 tenant-id 隔離策略。可參考
+[`services/ledger/migrations/`](https://github.com/m24927605/agentic-spendguard/tree/main/services/ledger/migrations)。
+
+## Importer stub
+
+固定月費計量器本來就是盡力而為。要拿它去跟供應商的帳單報表對帳、
+把數字校準回來,D13 出了一批 **stub** importer crate,先把 Day-2
+對帳的合約鎖起來:
+
+```rust
+pub fn import_record_to_audit_row(rec: &ImportRecord) -> AuditRowDraft {
+    AuditRowDraft {
+        tenant_id: rec.tenant_id.clone(),
+        reservation_source: "subscription_meter",
+        import_source: rec.importer_kind.as_str(),
+        ..
+    }
+}
+```
+
+D14 / D15 / D16 會把 Devin / Manus / Genspark 的 live importer 點亮。
+Anthropic Console Usage 跟 OpenAI Admin Usage 會繼續維持 stub 狀態,
+等各自的 Admin API 推出再說。
+
+## Demo
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=subscription_meter
+```
+
+會走過三個 cap 判定情境(PASS / SOFT / HARD),驗證硬性上限的回應
+帶有 `Retry-After ∈ [1, 86_400]`,並確認那條最關鍵的不變式:在計量
+租戶底下,`ledger_entries` **零**筆、`reservations` 也**零**筆。
+
+可參考 [`deploy/demo/subscription_meter/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/subscription_meter/README.md)。
+
+## 延伸閱讀
+
+* [設計 —— `docs/specs/coverage/D13_subscription_meter/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D13_subscription_meter/design.md)
+* [實作骨架 —— `implementation.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D13_subscription_meter/implementation.md)
+* [審查標準 —— `review-standards.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D13_subscription_meter/review-standards.md)

@@ -1,0 +1,253 @@
+---
+title: "用 SpendGuard 给 Letta(原 MemGPT)做预算管控"
+description: >-
+  给 Letta(原 MemGPT,带持久化记忆的有状态 agent 平台)做调用前的
+  token 预算管控。库模式走 D26 的 LLMClientBase 包装;server 模式走
+  D02 + D03 的 egress-proxy 直接接入。
+---
+
+> 你的 Letta `Agent.step()` 一轮会扇出 3-4 次内部 LLM 调用(推理 →
+> 工具选择 → 反思),到底是哪一次把预算打爆了——账单出来之前你根本看
+> 不出来。SpendGuard 直接继承
+> `letta.llm_api.llm_client_base.LLMClientBase`(Letta 每个 provider
+> 客户端都派生自这个共享 ABC),用组合的方式包住一个内层客户端,这样
+> 每次 `send_llm_request()` 调用都会在上游 HTTP 发出**之前**先对预算
+> 做预留。一个包装器覆盖 Letta 的所有 provider——OpenAI、Anthropic、
+> Google、DeepSeek——因为管控点就坐在 ABC 这一层。
+
+## 先看这一节:库模式 vs server 模式
+
+**约 70% 的 Letta 部署跑的是 `letta server` REST**(标准的生产形态)。
+server 模式下**不要**装 D26——改用 egress-proxy 直接接入。D26 只适用
+于内嵌的库模式。
+
+| 你的 Letta 跑法 | 用什么 | 为什么 |
+|---------------------|-----|-----|
+| **`letta server` REST**(推荐的生产形态) | [D02 closed-CLI 安装](/docs/integrations/litellm-proxy/) + [D03 base-URL 直接接入](/docs/integrations/openai-agents/)——跳过 D26 | egress-proxy 已经覆盖,Letta 内部不动任何 SDK。一次接入就管住所有 provider 调用。 |
+| **内嵌库**(`from letta import ...`) | **D26 `wrap_llm_client(inner=OpenAIClient(...), ...)`**(本页) | 没有上游 hook 的情况下,这是唯一安全的逐调用管控点。`step_callback` 太粗——一轮扇出 3-4 次 LLM 调用,它也只触发一次。 |
+| **走 LiteLLM 路由**(任何内层 provider 是 `LiteLLMClient` 的 Letta 部署) | [D12 LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/) 已经间接覆盖 | 不需要做 D26。 |
+
+如果你直接划过表格想找"真正"的答案:答案就是这张表。库模式和 server
+模式是两个不同的产品,接的集成也不一样。D26 只管库模式。
+
+## 为什么你会想用这个(库模式)
+
+- **一个包装器,覆盖 Letta 所有 provider。** Letta 的
+  `letta.llm_api.llm_client_base.LLMClientBase` ABC 坐在 vendor SDK
+  边界**之上**。SpendGuard 继承这个 ABC,用组合的方式包住一个内层客
+  户端;一个包装器实例对 `OpenAIClient` / `AnthropicClient` /
+  `GoogleAIClient` / `DeepSeekClient` 的管控方式完全一致。你不用为每
+  个 vendor 写适配器。
+- **逐调用管控,不是逐轮管控。** Letta 唯一内置的 hook
+  (`step_callback`)每次 `Agent.step()` 只触发一次,而一轮经常扇出
+  3-4 次内部 LLM 调用(推理 → 工具选择 → 反思)。在 step 这一层做管
+  控会超额发放预留。D26 坐在 `send_llm_request` 上,能观测到每一次
+  LLM 调用。
+- **调用前拒绝,不是事后记账。** DENY 直接从 `send_llm_request()` 抛
+  出 `DecisionDenied`。`LLMClientBase` 在这条路径上没有任何框架侧的
+  catch(已对 letta 0.8.0 验证过),所以这个抛出会干净地传到
+  `Agent.step` 的调用方——上游的模型调用**绝不会**发出。
+- **审计 + 审批流水线与其他所有框架共享。** 这个包装器写入的是和
+  LangChain、Pydantic-AI、OpenAI Agents、Google ADK、AWS Strands、
+  DSPy、Agno、BeeAI、AutoGen / AG2、SmolAgents 这些集成同一个
+  SpendGuard ledger。共享的 `spendguard_run_context` contextvar(复用
+  自 `spendguard.integrations.openai_agents`)意味着:一个外层
+  LangChain run 包住一个 Letta agent 时,两者复用同一个 `run_id`。
+
+## 安装(60 秒)
+
+```bash
+pip install 'spendguard-sdk[letta]'
+pip install 'letta>=0.8,<1.0'
+```
+
+用 demo 栈拉起一个 sidecar:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## 接线
+
+```python
+import asyncio
+
+from letta.llm_api.openai_client import OpenAIClient
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.letta import (
+    SpendGuardLettaClient,
+    wrap_llm_client,
+    RunContext, run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def estimate(request_data):
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget",
+            unit=unit,
+            amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    inner = OpenAIClient()  # reads OPENAI_API_KEY + OPENAI_BASE_URL
+    guarded = wrap_llm_client(
+        inner=inner,
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate,
+    )
+
+    # Hand `guarded` to your Letta Agent per its documented
+    # LLMClient injection point. Letta's `Agent` calls
+    # `inner.send_llm_request` once per internal reasoning step;
+    # the wrapper inserts PRE/POST around each call.
+    agent = letta_agent_factory(llm_client=guarded, ...)  # your factory
+
+    async with run_context(RunContext(run_id="my-run-1")):
+        response = await agent.step("Say hello in three words.")
+    print(response)
+
+
+asyncio.run(main())
+```
+
+**`claim_estimator` 是必填的。** 按 design.md §5,包装器不自带默认的
+estimator——各 provider 的 tokenizer 互不一致(OpenAI `cl100k_base` vs
+Anthropic vs Gemini),单一默认值太脆。这个预估逻辑由运维方自己提供。
+
+## 工作原理
+
+```text
+Agent.step(message)
+  → (internal reasoning loop, fans out to 3-4 LLM calls per turn)
+    → SpendGuardLettaClient.send_llm_request(request_data, llm_config, tools, ...)
+        ├─ ctx = current_run_context()
+        ├─ signature = blake2b(request_data | llm_config | tools | force_tool_use)
+        ├─ llm_call_id / decision_id derived from signature
+        ├─ sidecar.RequestDecision(LLM_CALL_PRE, projected_claims)
+        │     ALLOW    → continue
+        │     DENY     → DecisionDenied propagates (no inner HTTP)
+        ├─ inner.send_llm_request(...)              ← provider HTTP
+        └─ sidecar.emit_llm_call_post(SUCCESS|FAILURE|CANCELLED,
+                                      estimated=usage.total_tokens)
+```
+
+包装器继承 `letta.llm_api.llm_client_base.LLMClientBase`,但**不调用
+`super().__init__()`**——这个 ABC 的 init 接收的是 provider 配置
+(API key、base URL、重试策略),这些不归包装器管。一旦调了
+`super().__init__()`,上游一重构,内层客户端的行为就会悄悄变掉。内
+层客户端靠组合持有:SpendGuard 从不直接实例化 `OpenAIClient` /
+`AnthropicClient` / `GoogleAIClient` / `DeepSeekClient`。
+
+`__getattr__` 把包装器没有覆盖的每个 `LLMClientBase` 属性
+(`llm_config`、`provider`、`build_request_data`、
+`convert_response_to_chat_completion`,以及今后任何新增的)都委托给内
+层客户端——而且没有副作用,这样框架侧的 token 预算上限和消息历史构造
+器看到的就是一个透明的透传层。
+
+## 同步路径的安全处理
+
+Letta 还为老代码路径暴露了 `send_llm_request_sync()`。包装器对应的同
+步版本会用 `asyncio.get_running_loop()` 检测当前有没有活跃的 asyncio
+loop,**如果有就抛 `RuntimeError`**,并指向异步版本:
+
+```python
+# OK — fresh thread, no active loop:
+result = guarded.send_llm_request_sync(request_data, llm_config)
+
+# Raises RuntimeError — inside an active loop, use the async path:
+async def inside_loop():
+    return guarded.send_llm_request_sync(request_data, llm_config)
+    # ^ RuntimeError("...send_llm_request_sync called from inside an
+    #                 active asyncio loop. Use `await
+    #                 client.send_llm_request(...)` instead — the
+    #                 async variant is the canonical Letta 0.8+ path.")
+```
+
+这是故意为之——在一个活跃 loop 里悄悄做 `asyncio.run()` 重入,会把父
+loop 上任何在途的 `send_llm_request` 的预留状态搞坏。
+
+## 多语言栈共享 run-context
+
+`RunContext` / `run_context()` / `current_run_context()` 这几个符号是
+从 `spendguard.integrations.openai_agents` 重新导出的(在没装
+`[openai-agents]` extra 时,会回退到一个 contextvar 名等价的实现)。一
+个混用 OpenAI Agents、Letta、AutoGen 的多语言栈在同一个 run 里共享同一
+条 trace,因为这三个适配器读的是同一个模块级 `spendguard_run_context`
+contextvar。
+
+```python
+from spendguard.integrations.openai_agents import RunContext, run_context
+
+async with run_context(RunContext(run_id="polyglot-run-1")):
+    # All three calls land under the same run_id in the ledger:
+    await openai_agents_runner.run(orchestrator_agent, "...")
+    await letta_agent.step("...")                 # gated by D26
+    await autogen_assistant.on_messages([...], cancellation_token)
+```
+
+## D26 不覆盖什么
+
+- **`letta server` REST 接口**——用 D02 + D03 的 egress-proxy 直接接
+  入。见本页顶部的决策表。
+- **`letta.embeddings.*`**——embedding 管控是一个单独的交付项,
+  `BudgetClaim` 的形状也不一样。在 Letta 集成的 backlog 里跟踪;D26 只
+  管 LLM 调用。
+- **`step_callback`**——明确不够用。粗粒度的逐轮管控会给多调用的一轮
+  超额发放预留。客户在 D26 之上再叠一个 callback 做更高层的遥测没问
+  题,但 D26 本身不带这个。
+- **Letta 侧的上游 PR**——D26 完全是 SDK 内部的事。包装器是围绕对
+  `LLMClientBase` 的组合来构建的;关键路径上不需要任何 Letta
+  maintainer 出手。
+
+## 跑一下 demo
+
+```bash
+cd deploy/demo
+make demo DEMO_MODE=agent_real_letta
+```
+
+这会拉起完整的 sidecar 栈,在一个 runner 容器里装上
+`letta>=0.8,<1.0` 和 `spendguard-sdk[letta]`,并通过
+`SpendGuardLettaClient` 驱动一次 `send_llm_request`。验证 gate 会断言
+ledger 在 `tenant_id = 00000000-0000-4000-8000-000000000001` 下持有一
+对 `reserve` + `commit_estimated`,并且标准事件日志里有一条
+`spendguard.audit.decision` 记录,标记着
+`decision_context.integration = 'letta'`。
+
+## 另见
+
+- [D02 closed-CLI 安装](/docs/integrations/litellm-proxy/)——server 模式
+  路径。如果你跑 `letta server` 就用这个。
+- [D03 base-URL 直接接入](/docs/integrations/openai-agents/)——server
+  模式的响应形态。和 D02 配套用。
+- [D12 LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/)——间接
+  覆盖走 LiteLLM 路由的 Letta 部署。和 D26 可以安全共存(D26 在
+  `LLMClientBase` 这一层做预留,D12 在自己的 in-flight contextvar 置位
+  时会在 LiteLLM 这一层短路)。
+- [D24 AutoGen / AG2(Python)](/docs/integrations/autogen/)——同类参
+  考。一样的 `inner` 包装模式,只是 ABC 不同。
+- [源码:`spendguard/integrations/letta`](https://github.com/m24927605/agentic-spendguard/tree/main/sdk/python/src/spendguard/integrations/letta)
+- [源码:D26 设计规范](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D26_letta/design.md)

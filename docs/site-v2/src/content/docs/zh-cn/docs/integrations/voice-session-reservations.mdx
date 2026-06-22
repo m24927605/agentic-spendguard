@@ -1,0 +1,141 @@
+---
+title: "语音会话预留(底层 substrate)"
+description: >-
+  面向长生命周期 LiveKit 与 Pipecat 语音 agent 的会话级 reserve、流式 commit、
+  replay/重连、release 以及 TTL 过期底层 substrate。这是 D41 共享 substrate,
+  本身不是某个框架的 adapter hook。
+---
+
+> **是 substrate,不是 adapter。** D41 会话预留是 LiveKit 和 Pipecat 语音
+> adapter 必须复用的共享 budget 生命周期。本页不主张 LiveKit 或 Pipecat 的
+> adapter 覆盖,只描述这些 adapter 所依赖的预留契约。
+
+实时语音 agent 会保持单条 session 长开,而开销在 STT、LLM 轮次、tool 调用、
+流式响应以及 TTS 输出之间持续累积。request 级别的 reserve 没法干净地建模这种
+生命周期。D41 引入了一个会话级的 ledger hold:语音 adapter 可以在付费 session
+开始前先 reserve 一个额度信封,在 session 进行中提交正向流式 delta,并在 session
+结束或过期时把剩余额度 release 回去。
+
+```text
+voice room connect
+  -> ReserveSession      # hold session budget before paid provider dispatch
+  -> CommitSessionDelta  # positive idempotent streaming deltas
+  -> CommitSessionDelta  # reconnect replays by streaming_commit_id
+  -> ReleaseSession      # release uncommitted remainder
+  -> SessionExpire       # TTL safety net for crashed sessions
+```
+
+## 哪些路径被 gate
+
+| 路径 | 状态 |
+|---|---|
+| Session 启动 | `ReserveSession` 在语音 adapter 接入付费模型流量之前先建立一个 ledger hold。 |
+| 流式开销 | `CommitSessionDelta` 对该 hold 施加正向幂等 delta。 |
+| 重连 / replay | 完全相同的 replay 返回原始 outcome;同一 key 携带不同 payload 则冲突。 |
+| 超额(overrun) | 超出 hold 额度的 commit delta 直接拒绝,不改动已 committed 或已 released 余额。 |
+| 结束 / 崩溃 | `ReleaseSession` 释放剩余额度;若 adapter 失联,TTL 过期同样释放剩余额度。 |
+
+这个 hold 不是授信额度(credit line)。每次 commit 都会减少 hold 的剩余额度,
+并增加 committed 开销。release 或过期只把未 commit 的剩余额度结算回可用 budget。
+
+## 契约
+
+该 substrate 固定在现有的 sidecar adapter 服务里:
+
+<div is:raw>
+
+```text
+rpc ReserveSession(ReserveSessionRequest) returns (ReserveSessionOutcome)
+rpc CommitSessionDelta(CommitSessionDeltaRequest) returns (CommitSessionDeltaOutcome)
+rpc ReleaseSession(ReleaseSessionRequest) returns (ReleaseSessionOutcome)
+```
+
+</div>
+
+`ReserveSessionRequest` 要求传入当前 SpendGuard substrate 标准的 reserve 时刻
+元组:`tenant_id`、`budget_id`、`window_instance_id`、`unit`、`pricing`、
+`session_id`、`route`、`estimated_amount_atomic`、`ttl_seconds`,以及
+`idempotency_key`。
+
+任何使用该 substrate 的新 adapter,从第一天起就必须把 `unitId`、
+`windowInstanceId` 以及 pricing 冻结元组贯穿下来。一旦元组发生漂移,ledger commit
+会拒绝。
+
+当前收尾状态:sidecar 的 UDS 方法是可编译、fail-closed 的 `UNIMPLEMENTED`
+桩(stub)。本地 D41 demo 直接验证 ledger 会话生命周期与 canonical 审计路径。
+LiveKit 或 Pipecat adapter 调用这些 session RPC 之前,必须先合入一个
+sidecar 到 ledger 的 bridge slice,即 `COV_D41S_06_sidecar_session_bridge`。
+
+## 审计链
+
+会话生命周期事件会以签名的审计 decision/outcome 对写入,并经由现有审计路径
+canonical 化。事件族如下:
+
+| 事件 | 触发时机 |
+|---|---|
+| `spendguard.audit.session.reserve` | session hold 已接受。 |
+| `spendguard.audit.session.commit_delta` | 流式 delta 已 commit。 |
+| `spendguard.audit.session.release` | 剩余额度已 release。 |
+| `spendguard.audit.session.expired` | TTL 清扫释放了剩余额度。 |
+| `spendguard.audit.session.denied` | session reserve 或 overrun 被拒。 |
+
+Reserve DENY 会把完整的强类型 outcome 返回给调用方,包含当前可用额度;而签名的
+审计 outcome 则只保留确定性的拒绝事实,这些事实在 replay 时保持稳定。
+
+## 跑 demo
+
+<div is:raw>
+
+```bash
+make -C deploy/demo demo-down
+make -C deploy/demo demo-up DEMO_MODE=session_reservation
+make -C deploy/demo demo-verify-session-reservation
+```
+
+</div>
+
+成功的 runner 输出行:
+
+<div is:raw>
+
+```text
+[demo] session_reservation ALL 7 steps PASS
+```
+
+</div>
+
+该 demo 使用真实的 Postgres ledger 和 canonical 数据库。覆盖的场景包括:一次主
+reserve、两次正向 commit、幂等 replay、冲突检测、overrun 拒绝、release、一次真实
+余额不足的 reserve DENY(并附带 replay/冲突校验),以及第二个经由 TTL 过期的预留。
+hard gate 会断言恰好八个签名的 decision/outcome 对,且范围限定在这三个 demo
+session 预留 ID 上。
+
+## Adapter 交接
+
+LiveKit 和 Pipecat 的 adapter 工作应当参照已锁定的 D41 substrate 设计以及
+sidecar bridge spec,而不是自行发明一套本地语音生命周期。预期 adapter 代码要把
+框架的 session/room ID 翻译成 `session_id`,在付费 provider 工作开始前先 reserve,
+用稳定的 `streaming_commit_id` 提交正向流式 delta,并在 session 结束时 release,
+同时依赖 TTL 来做崩溃恢复。
+
+在 sidecar bridge demo 跑通 UDS 路径之前,运行时 adapter 工作一律暂不启动:
+
+<div is:raw>
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=session_bridge
+make -C deploy/demo demo-verify-session-bridge
+```
+
+</div>
+
+## 链接
+
+- Demo overlay:
+  [`deploy/demo/session_reservation/`](https://github.com/m24927605/agentic-spendguard/tree/main/deploy/demo/session_reservation)
+- 已锁定的 substrate spec:
+  [`docs/specs/coverage/D41_session_reservation_substrate/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D41_session_reservation_substrate)
+- Sidecar bridge spec:
+  [`docs/specs/coverage/D41_sidecar_session_bridge/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D41_sidecar_session_bridge)
+- Slice 文档:
+  [`docs/slices/COV_D41S_01_session_contract_spec_and_proto.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/slices/COV_D41S_01_session_contract_spec_and_proto.md)

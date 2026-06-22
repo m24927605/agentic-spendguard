@@ -1,0 +1,136 @@
+---
+title: "Flowise 自定义节点 — @spendguard/flowise-nodes"
+description: >-
+  把 Agentic SpendGuard 作为 Flowise 自定义节点装上。SpendGuard
+  ChatModel Wrapper 可以拖到任意画布上,包住任意 BaseChatModel,
+  并挂上 D04 的 SpendGuardCallbackHandler——这样每次 chat 调用在上游
+  HTTP 真正发出之前,都会先到 SpendGuard sidecar 预留额度。默认 fail-closed;
+  每次调用默认按保守的 $1 USD-micros 预占。
+---
+
+> [Flowise](https://flowiseai.com/) 是目前最大的开源 no-code
+> 可视化 agent 构建器(~40k GitHub stars,Apache-2.0)。画布上每个节点
+> 都是一个实现 `INode` 契约的 TypeScript 类;chat-model 节点把上游 HTTP
+> 包在一个可拖拽的锚点后面。SpendGuard 以 `@spendguard/flowise-nodes`
+> 形式发布——用 `npm` 装,重启 Flowise,wrapper 就出现在 **Spend Guard →
+> SpendGuard ChatModel Wrapper** 下面。把它放在任意 ChatModel 和下游
+> Chain / Agent 之间,每次调用都会在上游模型 HTTP 发出之前,先到
+> SpendGuard sidecar 预留额度。
+
+## 为什么 Flowise 要用 SpendGuard
+
+Flowise 的逐节点 ChatModel 配置,是整个 no-code 可视化构建器生态里最干净
+的扩展点——但今天一个调用 OpenAI / Anthropic / Bedrock 的 chatflow,既没有
+调用前的金额闸门,也没有预留,更没有签名审计。SpendGuard wrapper 拖进去就能:
+
+- 在画布把上游 HTTP 派发出去**之前**,就按运维配置好的 budget 预留预测开销。
+  DENY 直接跳过上游——预测层抛出一个 SpendGuard error,provider 那边一个
+  token 都不会计费。
+- 从 LangChain.js callback handler 的调用结束 hook 里,提交真实的
+  `inputTokens + outputTokens`(wrapper 原样复用 D04 的
+  `SpendGuardCallbackHandler`)。
+- 只往画布加**一个**节点——构建者不用写 TypeScript,不用 fork Flowise
+  代码库,也不会丢掉任何其他 Flowise 功能。
+
+## 安装
+
+### 路径 1 —— 直接 npm install 到 Flowise 源码
+
+```bash
+cd /path/to/Flowise
+pnpm add @spendguard/flowise-nodes
+pnpm restart
+```
+
+wrapper 会出现在画布侧边栏的 **Spend Guard → SpendGuard ChatModel Wrapper**
+下面。
+
+### 路径 2 —— 官方 Docker 镜像的 drop-in
+
+```bash
+npm pack @spendguard/flowise-nodes
+mkdir -p ~/.flowise/nodes/spendguard
+tar -xzf spendguard-flowise-nodes-0.1.0.tgz \
+    -C ~/.flowise/nodes/spendguard --strip-components=1
+docker restart flowise
+```
+
+### 路径 3 —— 自定义 Dockerfile 层
+
+```dockerfile
+FROM flowiseai/flowise:2
+USER root
+RUN npm install -g @spendguard/flowise-nodes && \
+    cp -r /usr/local/lib/node_modules/@spendguard/flowise-nodes/dist \
+          /root/.flowise/nodes/spendguard
+USER node
+```
+
+## 在画布上配置
+
+| 输入项                      | 是否必填 | 说明                                                                                   |
+| --------------------------- | -------- | -------------------------------------------------------------------------------------- |
+| `chatModel`                 | 必填     | 任意 Flowise `BaseChatModel`(ChatOpenAI、ChatAnthropic、ChatBedrock、ChatGoogleVertexAI 等)。 |
+| `tenantId`                  | 必填     | SpendGuard tenant UUID。                                                                |
+| `budgetId`                  | 必填     | 要扣费的 SpendGuard budget UUID。                                                       |
+| `windowInstanceId`          | 必填     | 当前活跃的 SpendGuard budget-window instance UUID。                                     |
+| `unit`                      | 默认     | 默认 `usd_micros`;可按 provider 单位覆盖。                                             |
+| `sidecarUds`                | 可选     | 不填则回落到环境变量 `SPENDGUARD_SIDECAR_UDS`。                                         |
+| `route`                     | 可选     | 默认 `llm.call`;逐 route 的 SpendGuard 策略挂在这里。                                  |
+| `claimEstimatorJson`        | 可选     | JSON `{"amountAtomic":"...","scopeId":"..."}`。留空 → 每次调用按保守的 $1 USD-micros 默认预占。 |
+
+## 行为矩阵
+
+| 路径                       | 发生什么                                                                                                                           |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Sidecar **ALLOW**          | wrapper 挂上 handler;被包住的模型派发到上游;commit 提交真实的 `inputTokens + outputTokens`。                                     |
+| Sidecar **DENY**           | D04 handler 在 `handleChatModelStart` 里抛出。**没有上游 HTTP。** Flowise 会在 prediction 响应里把这个 error 返回出来。              |
+| Sidecar **DEGRADE**        | 默认 fail-closed —— handler 抛出。                                                                                                 |
+| `claimEstimatorJson` 留空  | 每次调用按保守的 `$1` USD-micros 默认预占(对 no-code 构建器开箱即用)。                                                          |
+| `claimEstimatorJson` 已设  | JSON 覆盖值驱动预留金额;逐 route 的调优在这里做。                                                                                  |
+
+## 决策矩阵:对比 egress proxy
+
+你也可以在网络层经由 SpendGuard egress proxy 给 Flowise 开销做闸门(把
+Flowise 进程的 `OPENAI_BASE_URL` 指向 SpendGuard endpoint)。两条路径最终
+都接到同一条审计链;按拓扑来选:
+
+| 什么场景                                                                                                | 路径                              |
+| ------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| 你自己掌控 Flowise 画布 + 想要侧边栏里有一个可视化入口 + 逐节点 budget 控制。                            | `@spendguard/flowise-nodes`        |
+| Flowise 只是众多拨向同一个 provider URL 的工具之一——你想要一份配置全覆盖。                              | Egress proxy `OPENAI_BASE_URL`     |
+| 你需要审计链里有画布节点级别的元数据(`canvas_node_id`、`flow_id`)。                                    | `@spendguard/flowise-nodes`        |
+| 你动不了 Flowise 安装(托管部署,不允许装 SDK)。                                                       | Egress proxy                       |
+
+## 局限
+
+- **只在 ChatModel 锚点。** Embeddings、vector store、tool 节点和 RAG 源
+  走 SpendGuard egress proxy 做闸门(见
+  [drop-in 指南](/docs/drop-in/))。
+- **只管单节点 budget。** 跨节点的 budget 不变式是契约层(D04 / D05)的职责
+  ——用契约 DSL 把画布 budget 串联起来,别靠 wrapper。
+- **只支持自托管 Flowise。** Flowise Cloud 不允许 drop-in 自定义节点;
+  wrapper 只能 sideload。
+- **没有流式中途封顶。** 只在 stream 结束时 commit;不过 sidecar 仍然会在
+  调用前封顶。
+- **只支持 `flowise-components` 2.x。** 通过 `peerDependencies` 钉死到
+  `>=2.0.0`。1.x 的 INode 契约不一样,wrapper 装不上。
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=flowise_real
+```
+
+拉起基础 SpendGuard 栈(postgres / ledger / sidecar / canonical-ingest /
+outbox-forwarder),外加一个网络内的计数 stub 和一个 Node 20 runner——后者
+用一个 3 步矩阵(ALLOW + DENY + STREAM)跑过 wrapper 的 reserve / commit /
+release 生命周期。该矩阵在 SpendGuard ledger 层验证 INV-1(DENY 跳过上游)
+和 INV-5(提交真实用量)。
+
+## 源码
+
+- Wrapper 包:`integrations/flowise/`
+- Demo overlay:`deploy/demo/flowise_real/`
+- 示例 chatflow:`examples/flowise/`
+- Spec:`docs/specs/coverage/D35_flowise/`

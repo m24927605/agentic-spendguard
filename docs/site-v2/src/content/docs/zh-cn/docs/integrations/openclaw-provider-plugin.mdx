@@ -1,0 +1,153 @@
+---
+title: "OpenClaw provider plugin"
+description: >-
+  进程内的 OpenClaw provider 包装器,在分发到 provider 之前做硬性、fail-closed 的
+  SpendGuard 预算管控。仅在受信任的 OpenClaw 部署中使用;D40a base-URL 路由仍是长期可靠的兜底方案。
+---
+
+> **进程内 hook,不是 sandbox。** OpenClaw provider plugin 运行在 OpenClaw
+> 进程内部。它是一个管控 hook,不构成 sandbox 边界。运维方只应在受信任的
+> OpenClaw 部署中安装它。当 plugin API 发生变化、或者无法接受安装 plugin 时,
+> 请改用 [D40a base-URL 路由](/docs/drop-in/openclaw/)。
+
+`@spendguard/openclaw-provider-plugin` 在 D40b 锁定的 provider 运行时 hook
+`wrapStreamFn(ctx)` 上包装一个 OpenClaw provider。它会在调用 `ctx.streamFn(params)`
+或上游 provider 包装器之前,先通过 SpendGuard sidecar 完成 reserve,并把成功、
+流式完成、provider 错误、超时和 abort 都结算到同一笔 reservation 上。
+
+## What Gets Gated
+
+| Path | Status |
+|---|---|
+| 非流式的 OpenAI 兼容 provider 调用 | 分发前 reserve,响应返回后结算 SUCCESS。 |
+| 流式 provider 调用 | 首个 chunk 之前一次 reserve,迭代器完成后一次 SUCCESS 结算。 |
+| DENY / STOP | provider 分发前抛出;上游计数器不动。 |
+| provider 错误 | 结算 `PROVIDER_ERROR`,然后重新抛出 provider 错误。 |
+| 客户端超时 / abort | 结算 `CLIENT_TIMEOUT` 或 `RUN_ABORTED`。 |
+
+D40b 并不声称能稳定每一个历史版本的 OpenClaw plugin API。锁定版本是
+`openclaw@2026.6.2`,对应
+`openclaw/openclaw@d4819948f37d45fe8f1428401316eaae456cdf16`。
+
+## Install
+
+<div is:raw>
+
+```bash
+pnpm add @spendguard/sdk @spendguard/openclaw-provider-plugin openclaw
+```
+
+</div>
+
+锁定的 OpenClaw 包要求 Node `>=22.19.0`。仅支持 ESM。
+
+## Configure
+
+通过 OpenClaw 的 provider plugin 注册入口注册受管控的 provider。demo 使用的本地
+fixture 记录了锁定的安装结构:
+
+<div is:raw>
+
+```json
+{
+  "plugins": {
+    "spendguardProviderPlugin": {
+      "package": "@spendguard/openclaw-provider-plugin",
+      "factory": "createSpendGuardOpenClawProvider",
+      "mode": "in-process-provider-wrapper",
+      "hook": "wrapStreamFn",
+      "trustBoundary": "trusted-openclaw-process"
+    }
+  }
+}
+```
+
+</div>
+
+显式传入 sidecar 身份和 reserve tuple:
+
+<div is:raw>
+
+```ts
+import { SpendGuardClient } from "@spendguard/sdk";
+import { createSpendGuardOpenClawProvider } from "@spendguard/openclaw-provider-plugin";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: process.env.SPENDGUARD_TENANT_ID,
+  runtimeKind: "openclaw-provider-plugin",
+});
+await client.connect();
+await client.handshake();
+
+const guardedProvider = createSpendGuardOpenClawProvider(upstreamProvider, {
+  client,
+  tenantId: process.env.SPENDGUARD_TENANT_ID,
+  budgetId: process.env.SPENDGUARD_BUDGET_ID,
+  windowInstanceId: process.env.SPENDGUARD_WINDOW_INSTANCE_ID,
+  unitId: process.env.SPENDGUARD_UNIT_ID,
+  pricing: {
+    pricingVersion: process.env.SPENDGUARD_PRICING_VERSION ?? "",
+    pricingHash: Uint8Array.from(
+      Buffer.from(process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX ?? "", "hex"),
+    ),
+    fxRateVersion: process.env.SPENDGUARD_FX_RATE_VERSION ?? "",
+    unitConversionVersion: process.env.SPENDGUARD_UNIT_CONVERSION_VERSION ?? "",
+  },
+});
+```
+
+</div>
+
+`unitId`、`windowInstanceId` 和 `pricing` 从第一天起就是必填项。ledger 会拒绝
+空的 unit/window id,也会拒绝 pricing tuple 与 reservation 不匹配的 commit。
+
+## Failure Posture
+
+这里没有 `failOpen`、`degradeOnUnavailable` 或禁用开关。DENY、审批 stop、sidecar
+宕机、或畸形的 reserve tuple 都会在 provider 调用之前直接 abort。provider 错误是
+另一种情况:此时 provider 已经调用过了,因此包装器会结算 `PROVIDER_ERROR`,并把
+原始错误重新抛回给 OpenClaw。
+
+## Run The Demo
+
+<div is:raw>
+
+```bash
+make demo-down
+make demo-up DEMO_MODE=openclaw_provider_plugin
+make -C deploy/demo demo-verify-openclaw-provider-plugin
+```
+
+</div>
+
+成功时的 runner 输出行:
+
+<div is:raw>
+
+```text
+[demo] openclaw_provider_plugin ALL 4 steps PASS (ALLOW + DENY + STREAM + PROVIDER_ERROR)
+```
+
+</div>
+
+这个 demo 会校验已提交的 OpenClaw plugin config fixture,把 workspace 包载入
+Node 22.19 runner,通过 UDS 与真实 sidecar 通信,并使用一个本地的 OpenAI 兼容
+计数 stub。硬性 gate 断言 `reserve=3`、`commit_estimated=2`、`release=1`、
+`denied_decision=1`、canonical `decision=4`、canonical `outcome=3`、outbox 闭合,
+以及计数 stub 的 `calls=3`(只含 ALLOW + STREAM + PROVIDER_ERROR)。
+
+## D40a Fallback
+
+当你无法安装进程内 plugin、或者需要一条更长期可靠的纯 config 路径时,请使用
+[OpenClaw + SpendGuard base-URL 路由](/docs/drop-in/openclaw/)。D40a 把 OpenClaw
+自定义 provider 的 `baseUrl` 指向 SpendGuard egress proxy。D40b 则是在 OpenClaw
+进程内部包装该 provider。
+
+## Links
+
+- npm package: `@spendguard/openclaw-provider-plugin`
+- Demo overlay:
+  [`deploy/demo/openclaw_provider_plugin/`](https://github.com/m24927605/agentic-spendguard/tree/main/deploy/demo/openclaw_provider_plugin)
+- Locked spec set:
+  [`docs/specs/coverage/D40b_openclaw_provider_plugin/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D40b_openclaw_provider_plugin)

@@ -1,0 +1,134 @@
+---
+title: "n8n 社区节点 — n8n-nodes-spendguard"
+description: >-
+  把 Agentic SpendGuard 作为一等公民的 n8n 社区节点装上。
+  SpendGuard Chat Model 子节点会包住任意一个 AI Language Model 子节点,
+  让 AI Agent 的每次调用先经 SpendGuard sidecar 预留预算、deny 路径在
+  provider HTTP 发出前就短路掉、commit 走 SpendGuard 审计链。
+---
+
+> [n8n](https://n8n.io/) 是当下最主流的可自托管无代码自动化平台。它的 AI Agent
+> 节点接受一个 `ai_languageModel` 子节点连接(`lmChatOpenAi`、`lmChatAnthropic`
+> 等)——但这些 Chat Model 子节点是直接把 prompt 发给 provider 的,既没有调用前
+> 的拒绝能力,也没有按 workflow 归因。SpendGuard 把 `n8n-nodes-spendguard`
+> 作为社区节点发布,它插在 Chat Model 和 AI Agent 之间:原样转发被包住的模型、
+> 挂上 D04 的 `SpendGuardCallbackHandler`,这样 AI Agent 的 run manager 在
+> provider HTTP 发出前就会对 SpendGuard sidecar 触发 `LLM_CALL_PRE`。
+
+## n8n 为什么要用 SpendGuard
+
+在无代码自动化这个品类里,n8n 的 `ai_languageModel` 子节点机制是最干净的调用前
+扩展点。今天一个调 OpenAI / Anthropic / Bedrock 的 workflow,既没有调用前的金额
+闸门,也没有预留,更没有签名审计。SpendGuard Chat Model 节点插进去之后:
+
+- **在** AI Agent 的 run manager 派发上游 HTTP **之前**,就对运维方配置的预算
+  预留好预估开销。DENY 直接跳过上游——workflow 执行会冒出
+  `NodeApiError(httpCode: "403")`,provider 一个 token 都不计费。
+- 在调用结束时通过 D04 的 `handleLLMEnd`,从 provider 的 usage 载荷里提交真实的
+  `inputTokens + outputTokens`。
+- 把 n8n 的 `executionId`、节点名、以及(可选的)workflow 作者指定的自定义 run
+  标识一路带进 SpendGuard 审计链——workflow 的每次运行在 ledger 里都是一等公民。
+
+## 安装(自托管 n8n)
+
+```bash
+# 1. Enable community packages on your self-hosted n8n.
+export N8N_COMMUNITY_PACKAGES_ENABLED=true
+
+# 2. Install the package.
+n8n npm install n8n-nodes-spendguard
+```
+
+接着,在 n8n 编辑器里:
+
+1. 打开 **Credentials**,新建一个 **SpendGuard API** 凭据:
+   - **Tenant ID** —— 你的 SpendGuard tenant UUID。
+   - **Sidecar UDS Path** —— runner pod 用来连 SpendGuard sidecar 的 Unix domain
+     socket(默认 `/var/run/spendguard/sidecar.sock`)。
+   - **Budget ID** —— 要计费的 SpendGuard 预算的 UUID。
+   - **Window Instance ID** —— 当前活跃 window instance 的 UUID。
+   - **Runtime Kind** —— 默认 `n8n`。
+2. 在任意 workflow 里,把一个 **SpendGuard Chat Model** 节点插在你的 Chat Model
+   (`lmChatAnthropic`、`lmChatOpenAi`……)和 **AI Agent** 节点之间:
+
+```
+[Chat Model] ──(ai_languageModel)──> [SpendGuard Chat Model] ──(ai_languageModel)──> [AI Agent]
+```
+
+3. 保存并执行 workflow。现在 AI Agent 派发的每一次模型调用,都会被 SpendGuard
+   sidecar 的审计链记录下来。
+
+## 安装(n8n Cloud)
+
+n8n Cloud 的 runner 策略禁掉了 UDS / 本地 FS 挂载;社区节点 v0.1.x 只面向
+**自托管**。一个走 control-plane HTTPS 的替代方案排在 v0.2 路线图上。
+
+## 行为对照表
+
+| 路径                                | 发生了什么                                                                                                                                  |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sidecar **ALLOW**                   | `supplyData` 返回挂好 SpendGuard handler 的上游模型;AI Agent 调用该模型;`handleLLMEnd` 提交真实用量。  |
+| Sidecar **DENY**                    | Handler 抛出 `DecisionDenied`;AI Agent 的 run manager 把这个异常往上抛,最终表现为 `NodeApiError(httpCode: "403")`。**没有任何上游 HTTP。** |
+| Sidecar **APPROVAL_REQUIRED**       | `NodeApiError(httpCode: "428")`,描述里带着审批请求 ID。到 SpendGuard 控制台批准后重跑。                  |
+| Sidecar **UNAVAILABLE**             | `NodeApiError(httpCode: "503")` —— runner pod 连不上 sidecar UDS。                                                                |
+| Sidecar **HANDSHAKE FAILURE**       | `NodeApiError(httpCode: "502")` —— TLS / SVID 被拒。                                                                       |
+| 响应里带 token 用量 | Commit 提交真实的 `inputTokens + outputTokens`。INV-5 主路径。                                                                                |
+| 缺 token 用量                 | D04 的 handler 打一条 WARN 日志,回退到 estimator 快照。INV-5 兜底路径。                                                     |
+
+## 运行身份(Run identity)
+
+n8n 的 `executionId` 即 SpendGuard 的 `sessionId`;节点名即 `stepId`。`runId` 由
+节点的 **Run ID Source** 参数组合而成:
+
+- `Execution ID + Node Name`(默认)→ `runId = "${executionId}:${nodeName}"`。
+- `Node Name` → `runId = nodeName`。
+- `Custom Expression` → `runId = customRunId`(表达式为空时回退到
+  `${executionId}:${nodeName}`)。
+
+SpendGuard sidecar 收到的 `idempotencyKey` 来自 `@spendguard/sdk` 的
+`deriveIdempotencyKey({tenantId, sessionId, runId, stepId, llmCallId,
+trigger: "LLM_CALL_PRE"})` 推导——和 Python、TypeScript adapter 用的是同一个
+helper,所以审计链去重在每个框架间都通用。
+
+## 与 egress proxy 的取舍对照
+
+你也可以在网络层用 SpendGuard egress proxy 来给 n8n 的开销加闸门(在 workflow 的
+HTTP Request / Chat Model 节点上设 `OPENAI_BASE_URL`)。两条路径汇入同一条审计链,
+按拓扑来选:
+
+| 什么场景                                                                                          | 走哪条路径                        |
+| --------------------------------------------------------------------------------------------- | --------------------------------- |
+| 你自己掌控 n8n 运行时,且想在编辑器 UI 里有一个一等公民节点。                                       | `n8n-nodes-spendguard`            |
+| 你想在审计链里拿到按 workflow / 按 execution 的归因。                                              | `n8n-nodes-spendguard`            |
+| n8n 是托管 Cloud 负载,且你不想装任何社区节点。                                                    | Egress proxy                      |
+| 你想用一套配置覆盖 n8n 加上所有其他拨向同一 provider 的 tenant 工具。                              | Egress proxy                      |
+
+## 局限
+
+- **不包 SpendGuard Tool / Memory。** v0.1.x 只覆盖 `ai_languageModel` 子节点
+  —— `ai_tool` 和 `ai_memory` 属于 contract 层的事情,不在范围内。
+- **没有 workflow 级别的跨步骤预算预留。** 每次模型调用都是各自独立的预留;要做
+  跨整个 workflow 的预算,就在 AI Agent 前面用一个 Code 节点去驱动 `withRunPlan`。
+- **不支持 n8n Cloud。** 托管 runner 够不到 UDS / 本地 FS;Cloud 场景由 egress-proxy
+  路径覆盖。
+- **n8n ≥ 1.50。** 更早的版本用的是字符串字面量而非 `NodeConnectionType` 枚举常量,
+  社区节点加载不了。
+- **仅 CJS。** 截至 n8n 1.50,其社区节点 loader 不支持 ESM 社区节点。
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=n8n_real
+```
+
+拉起 SpendGuard 基础栈(postgres / ledger / sidecar / canonical-ingest /
+outbox-forwarder),外加一个网络内的计数 stub 和一个 Node 20 runner,用一个 3 步
+矩阵(ALLOW + DENY + STREAM)跑通该集成的 reserve / commit / release 生命周期。
+该矩阵在 SpendGuard ledger 层验证了 INV-1(DENY 跳过上游)和 INV-5(提交真实用量)。
+
+## 源码
+
+- 社区节点:`sdk/typescript-n8n/`
+- Demo overlay:`deploy/demo/n8n_real/`
+- 示例 workflow:`examples/n8n/`
+- Spec:`docs/specs/coverage/D37_n8n/`

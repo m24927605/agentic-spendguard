@@ -1,0 +1,252 @@
+---
+title: "LiteLLM SDK monkey-patch shim"
+description: >-
+  把 Agentic SpendGuard 用一行 monkey-patch 掛在 LiteLLM Python SDK 上。
+  直接呼叫 litellm.acompletion() 的人,以及所有間接呼叫者(CrewAI、DSPy、
+  SmolAgents、Strands、BeeAI、AutoGen、Atomic Agents),都能拿到一個
+  fail-closed 的 pre-call 預算 gate,框架那邊完全不用動。解掉 LiteLLM Issue #8842。
+---
+
+
+> [LiteLLM Issue #8842](https://github.com/BerriAI/litellm/issues/8842)
+> 開了一年多都還沒解:`async_pre_call_hook` 只會在 proxy 路徑上觸發。
+> 直接呼叫 `litellm.acompletion()` 的人,以及每一個拿 LiteLLM 當 LLM
+> transport 的 agent 框架,全都繞過了 pre-call gate。SpendGuard 的
+> **LiteLLM SDK monkey-patch shim** 就是來補這個洞的。只要呼叫一次
+> `install_shim(...)`,接下來在同一個 interpreter 裡跑的每一個
+> `await litellm.acompletion(...)` 都會走 SpendGuard 的 gate。
+
+## 為什麼要做 monkey-patch shim
+
+SpendGuard 本來就有三個 LiteLLM 介面:
+
+- **`spendguard.integrations.litellm.SpendGuardLiteLLMCallback`** ——
+  舊版的 `CustomLogger` callback,LiteLLM proxy admin 透過
+  `litellm_settings.callbacks:` 接上去。
+- **`spendguard.integrations.litellm_guardrail.SpendGuardGuardrail`**
+  —— 較新的 `CustomGuardrail` registry 介面;新的 proxy 維運者建議裝這個。
+- **`spendguard.integrations.litellm.SpendGuardDirectAcompletion`** ——
+  一個明確的 wrapper,呼叫端可以自己把它包在 `acompletion` 外面,走
+  direct-SDK 路徑(D11 SLICE A3)。
+
+但這三個都罩不到那些「不擁有 LLM 呼叫點」的直接呼叫者:
+
+```python
+# CrewAI internals — SpendGuard cannot patch this from outside
+async def _execute(self, agent, task):
+    response = await litellm.acompletion(
+        model=agent.llm,
+        messages=self._build_prompt(task),
+    )
+    return self._parse(response)
+```
+
+SpendGuard 沒辦法去上游框架的程式碼裡塞 constructor。這個 monkey-patch
+shim 的做法是直接在同一個 interpreter 裡、**在 module 層級**把
+`litellm.acompletion`(以及其他幾個 SDK 進入點)換掉,所以接下來對這些進入點的
+每一次呼叫 —— 不管是你自己的程式碼、CrewAI、DSPy、還是任何地方 —— 都會被導進
+SpendGuard core。
+
+## 安裝
+
+```bash
+pip install 'spendguard-sdk>=0.5.1'
+```
+
+D12 是**透過既有的 `spendguard-sdk` PyPI 套件**出貨的 —— 沒有新套件、沒有新的
+extras、也不會多拉一棵相依樹。只要裝了 SDK,這個 shim 就 import 得到。
+
+```python
+from spendguard import SpendGuardClient
+from spendguard.integrations.litellm_sdk_shim import (
+    SpendGuardShimOptions,
+    install_shim,
+    uninstall_shim,
+)
+
+client = SpendGuardClient(
+    socket_path="/var/run/spendguard/adapter.sock",
+    tenant_id="<your-tenant-uuid>",
+)
+await client.connect()
+await client.handshake()
+
+install_shim(SpendGuardShimOptions(
+    client=client,
+    tenant_id="<your-tenant-uuid>",
+    budget_id="<your-budget-uuid>",  # or $SPENDGUARD_BUDGET_ID
+    fail_open=False,                  # fail-closed default
+))
+
+# From this point on, every litellm.acompletion / completion /
+# Router.acompletion call (and every CrewAI / DSPy / SmolAgents /
+# Strands / BeeAI / AutoGen / Atomic Agents call that uses LiteLLM
+# under the hood) is SpendGuard-gated.
+try:
+    await crew.kickoff_async()  # transitive coverage, no CrewAI changes
+finally:
+    uninstall_shim()
+```
+
+## 會被 patch 的進入點
+
+呼叫 `install_shim()` 之後,下面這些 LiteLLM 進入點會被換成走 SpendGuard
+gate 的 wrapper:
+
+| 進入點 | 說明 |
+|-------------|-------|
+| `litellm.acompletion` | 主打的 async 路徑;凡是用 LiteLLM 的框架全都罩得到。 |
+| `litellm.completion` | sync wrapper 在非 async 情境下透過 `asyncio.run` 橋接。如果是從正在跑的 loop 裡面呼叫,它會拒絕橋接(不然會 deadlock),改丟 `SpendGuardShimSyncInAsyncContext`。 |
+| `litellm.atext_completion` | `/v1/completions` 的 async 路徑(舊的 text endpoint)。 |
+| `litellm.text_completion` | sync 的舊版 text endpoint。 |
+| `litellm.Router.acompletion` | class 層級的 patch,再走過一遍 `Router.__subclasses__()`,讓維運者自訂的 subclass 也一併進 gate。 |
+
+`embedding` / `aembedding` / `aimage_generation` / `atranscription`
+是刻意不放進 v1 範圍的(D12.1 會處理)。
+
+## 生命週期
+
+```
+caller → await litellm.acompletion(...)        [after install_shim()]
+   ↓
+shim wrapper:
+  if _IN_FLIGHT.get(): return await ORIGINAL(**kwargs)   [recursion guard]
+  token = _IN_FLIGHT.set(True)
+  try:
+    1. resolver → budget binding
+    2. estimator → projected claim
+    3. sidecar.request_decision  ←── BEFORE provider HTTP
+       ALLOW → continue · DENY → raise · DEGRADE → raise (fail-closed)
+    4. await ORIGINAL(**kwargs) → provider HTTP fires here
+    5. reconciler → real claim from response.usage
+    6. sidecar.emit_llm_call_post(SUCCESS)
+       exception → emit_llm_call_post(FAILURE | CANCELLED) + re-raise
+  finally:
+    _IN_FLIGHT.reset(token)
+```
+
+- `_IN_FLIGHT` 這個 re-entry guard 是一個 `contextvars.ContextVar` ——
+  per-asyncio-task,絕對不是 thread-local。LiteLLM 內部那些會遞迴呼叫
+  `litellm.acompletion` 的 fallback chain(Router retry、model alias 解析)
+  會短路到存下來的 original,不會 double-reserve。
+- DENY 會丟 `spendguard.errors.DecisionDenied`,而且帶著 `decision_id`,
+  維運者就能在 audit chain 裡追到這個 verdict。
+- DEGRADE 預設會丟 `spendguard.errors.SidecarUnavailable`(fail-closed)。
+  做 dev / local-loop 的時候可以設 `fail_open=True`;每次在 DEGRADE 下放行,
+  shim 都會記一筆 WARN,讓 fail-open 這條路是看得見的。
+- 取消(呼叫到一半碰到 `asyncio.CancelledError`)會走
+  `emit_llm_call_post(outcome=CANCELLED)`,然後把原本的 `CancelledError`
+  重新丟出來 —— 這樣 audit chain 看得到這次取消,reservation 也乾淨釋放掉。
+
+## Idempotent 安裝
+
+```python
+install_shim(opts_A)
+install_shim(opts_A)  # no-op — same options.signature
+install_shim(opts_B)  # raises SpendGuardShimAlreadyInstalled
+```
+
+shim 會從 options 物件 hash 出一個 `config_signature` —— 同樣的 options
+就靜靜地 no-op;不一樣的 options 就得先 `uninstall_shim()`。這是為了擋掉某個
+服務重新 import 自己的 bootstrap、結果不小心把 wrapper 疊兩層的狀況。
+
+## 間接覆蓋(transitive coverage)
+
+D12 最主打的價值就是**間接覆蓋**:在服務啟動時裝一次 shim,就替每一個拿
+LiteLLM 當 LLM transport 的框架拿到了預算覆蓋。
+
+| 框架 | 採用度(2026) | 怎麼用 LiteLLM | 覆蓋 |
+|-----------|-----------------|---------------------|----------|
+| **CrewAI** | 30k+ stars | `Agent.llm` 解析到 `litellm.acompletion` | Yes |
+| **DSPy** | 18k+ stars | `dspy.LM(...).__call__` 呼叫 `litellm.completion` | Yes |
+| **SmolAgents** | HF maintained | `LiteLLMModel` 呼叫 `litellm.completion` | Yes |
+| **Strands** | new in 2026 | 拿 LiteLLM 當預設的 LLM transport | Yes |
+| **BeeAI** | IBM maintained | 拿 LiteLLM 當預設的 LLM transport | Yes |
+| **AutoGen** | MSR maintained | 可選的 `litellm` 供應商 | Yes |
+| **Atomic Agents** | 5k+ stars | LiteLLM 是支援的供應商之一 | Yes |
+
+框架那邊完全不用動;不用開 PR;不用 fork。啟動時 `install_shim()` 一次就好。
+
+## 怎麼選對 LiteLLM 介面
+
+SpendGuard 提供四個 LiteLLM 整合。照你的部署形態來選:
+
+| 介面 | 什麼時候用 |
+|---------|----------|
+| `litellm_guardrail` | 你跑 LiteLLM proxy,而且想要一個完全不寫 Python、只動 `proxy_config.yaml` 的裝法。 |
+| `litellm`(callback) | 你跑 LiteLLM proxy,而且需要走舊版的 `CustomLogger` 路徑(既有維運者)。 |
+| `SpendGuardDirectAcompletion` | `litellm.acompletion` 的呼叫點是你自己擁有的,而且你偏好明確組裝,不想做 module 層級的 patch。 |
+| **`litellm_sdk_shim`(就是這個介面)** | 呼叫點不是你擁有的(CrewAI / DSPy / 等等)—— 或者它是你擁有的,但你想要一個 `install_shim()` 同時罩住你自己的程式碼**和**那些間接的框架呼叫。 |
+
+這四個底層共用同一套 reserve / commit / release 流程 —— 差別只在呼叫點是怎麼接到它的。
+
+## Demo
+
+D12 出貨時帶了兩個 demo mode,兩個都會打到一個真的 SpendGuard sidecar、跑完整條 end-to-end:
+
+```bash
+make demo-up DEMO_MODE=litellm_sdk_real
+```
+
+跑那個 3 步驟的 matrix(ALLOW + STREAM + TRANSITIVE/CrewAI)。counting-stub
+會 mock 掉 OpenAI 上游;SpendGuard sidecar 則透過 shim 替每一次呼叫做 gate。
+驗 INV-1(stub counter 的 delta)跟 INV-2(ledger 順序:reserve 要在 outcome 之前)。
+
+```bash
+make demo-up DEMO_MODE=litellm_sdk_deny
+```
+
+跑那個 3 個 substep 的 fail-closed matrix(ALLOW 正向對照 + DENY 預算耗盡 +
+DENY sidecar 連不上)。每一個 DENY 上,stub counter **一定**要維持不變(INV-1 負向對照)。
+
+驗證用的 SQL gate 分別放在
+[`deploy/demo/verify_step_litellm_sdk_real.sql`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/verify_step_litellm_sdk_real.sql)
+跟
+[`deploy/demo/verify_step_litellm_sdk_deny.sql`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/verify_step_litellm_sdk_deny.sql)。
+每個都會 gate:
+
+- `ledger_transactions.reserve` 筆數。
+- `ledger_transactions.commit_estimated` 筆數。
+- `ledger_transactions.denied_decision` 筆數(只有 DENY mode 才有)。
+- `audit_outbox.decision_context.mode='sdk'` —— 用來在同一條 canonical chain 裡,
+  把 shim 的稽核跟 proxy / direct / egress 區分開來。
+
+## 限制
+
+- **逐 token 的 streaming gating** 不在 v1 範圍內。shim 是在 stream 結束時、拿累積的
+  `response.usage` 來 commit。
+- **在正在跑的 loop 裡面呼叫 `litellm.completion()`** 會丟
+  `SpendGuardShimSyncInAsyncContext`,而不是默默幫你橋接(那樣會 deadlock)。
+  錯誤訊息會指你改用 `await litellm.acompletion(...)`。
+- **`embedding` / `aembedding` / `aimage_generation` /
+  `atranscription`** 在 v1 不會被 patch。保留給 D12.1。
+- **透過 import hook 自動安裝** 是刻意不支援的。維運者**必須**明確呼叫
+  `install_shim()`,這樣 monkey-patch 在 stack trace 裡看得到、也能還原回去。
+- **`install_shim()` 之後才建立的 Router subclass** 會透過 MRO 繼承到被 patch
+  的 parent。那些在 install **之前**就 override 掉 `acompletion` 的 subclass,
+  會被走過去、明確 patch 掉。但在 install **之後**才 override `acompletion` 的
+  subclass,除非它有呼叫 `super().acompletion(...)`,不然就會繞過 gate。如果你會
+  自己做 custom router,把這點寫進你的維運 runbook。
+
+## 疑難排解
+
+- **`SpendGuardShimAlreadyInstalled`** —— `install_shim()` 用不同的 options
+  被呼叫了兩次。先 `uninstall_shim()`。
+- **`SpendGuardShimSyncInAsyncContext`** —— 在正在跑的 event loop 裡呼叫了 sync 的
+  `litellm.completion()`。改成 `await litellm.acompletion(...)`。
+- **`DecisionDenied: budget exhausted`** —— sidecar 觸發了 DENY。這個 exception
+  帶著 `decision_id` + `reason_codes`;到 audit chain 裡追這個 decision
+  (`audit_outbox.event_type = 'spendguard.audit.decision'`)。
+- **`SidecarUnavailable: sidecar pre-call failed`** —— sidecar RPC 失敗、而且
+  `fail_open=False`。看一下 sidecar logs;確認 UDS path。`fail_open=True`
+  **只**在本機 dev 用。
+- **`get_num_tokens` 回傳 chars/4 fallback** —— shim 在 v1 不會 patch
+  token-count 那些 helper。如果你需要 token 精準的 pre-call 估算,透過
+  `SPENDGUARD_SIDECAR_HTTP_URL` 把 sidecar 的 HTTP companion 接起來。
+
+## 相關文件
+
+- [Quickstart](../../quickstart/) —— 5 分鐘把整套 SpendGuard 拉起來
+- [LiteLLM proxy guardrail](../litellm-proxy/) —— proxy 模式的對應做法
+- [Dify Model Provider Plugin](../dify/) —— Dify 原生的等價版本
+- [Microsoft Agent Framework](../microsoft-agent-framework/) —— MAF chat-client 中介軟體

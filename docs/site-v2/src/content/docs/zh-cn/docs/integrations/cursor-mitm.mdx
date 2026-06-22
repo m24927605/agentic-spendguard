@@ -1,0 +1,166 @@
+---
+title: "Cursor IDE MITM 编解码器 —— 实验性,仅限 SOW"
+description: >-
+  逆向出来的 Connect-RPC 编解码器,让 SpendGuard 能在 Cursor IDE
+  Agent 会话上插入预算预留。实验性功能,仅对签了维护补充条款的
+  Enterprise SOW 客户开放。只要 Cursor 改了线协议,编解码器就会失效。
+  客户自行承担失效窗口风险。切勿在 GA 配置中上线。
+sidebar:
+  badge:
+    text: Experimental
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="实验性 —— 仅限 SOW">
+  **切勿作为 GA 功能上线。** 本集成仅对签了维护补充条款的
+  Enterprise SOW 客户开放。只要 Cursor 改了线协议,编解码器就会失效。
+  客户作为 SOW 的一部分自行承担失效窗口风险。完整的法律立场见仓库里的
+  [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/SOW.md)。
+</Aside>
+
+> **法律立场。** 本编解码器实现的是
+> **逆向出来的互操作性(reverse-engineered interoperability)**。线格式记录在
+> [`PROTOCOL.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/PROTOCOL.md)
+> 中,全部从 Cursor 二进制外部观测得到,不含任何厂商源码。
+> 启用该编解码器的 SpendGuard 客户,都是在 Enterprise SOW 下操作,该 SOW
+> 明确确认:(a) 只要 Cursor 改了线协议,编解码器就会失效;
+> (b) 客户自行负责确认自家的 Cursor 服务条款是否允许在主机上对出站流量做 MITM。
+
+## 为什么 Cursor IDE 需要专门的适配器
+
+Cursor IDE 的 Agent 界面**不会**调用 `api.openai.com` /
+`api.anthropic.com`,而是走私有的 Connect-RPC 调用 `api.cursor.sh`,
+里面承载的是 Cursor 自有的消息封装。SpendGuard 的标准适配器(model
+middleware、base-URL 替换、OpenAI 兼容的出站代理)都看不见这些消息——
+线上的字节是 Cursor 内部的 protobuf,不是 OpenAI JSON。
+
+有些 SOW 客户在全员规模部署 Cursor,又想对 Cursor 会话做 SpendGuard 预算
+gating;他们以接受编解码器失效风险为代价,换来对整个会话的完整覆盖。
+
+## 编解码器具体做什么
+
+```
+Cursor IDE ──TLS→ SpendGuard egress proxy (D02 leaf w/ api.cursor.sh SAN)
+                       │
+                       ├─ if Host == api.cursor.sh AND feature `cursor-mitm-experimental`
+                       │     │
+                       │     ▼
+                       │  services/cursor_codec
+                       │     ├─ framing::ConnectRpcReader  → DecodedFrame
+                       │     ├─ envelope::CursorRequest::decode → ChatRequest
+                       │     ├─ translator::to_openai → CanonicalRequest
+                       │     │    └→ ledger::reserve → reservation_id
+                       │     ├─ upstream HTTPS to api.cursor.sh (re-encoded forward)
+                       │     ├─ envelope::CursorResponseStream::decode (server-streaming)
+                       │     ├─ translator::to_openai_chunks → CanonicalResponseChunks
+                       │     │    └→ ledger::commit_estimated / release
+                       │     └─ framing::ConnectRpcWriter → original Cursor wire
+                       │
+                       └─ else: D02 default pass-through (no codec)
+```
+
+编解码器在 workspace feature flag `cursor-mitm-experimental` 下发布。
+默认构建不会编译这个 codec crate;必须在 egress-proxy 和 CLI 消费方两个
+层面显式 opt-in 才会启用。
+
+## 三处醒目的 "EXPERIMENTAL" 标记
+
+按
+[`design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D17_cursor_mitm/design.md)
+§6,编解码器始终携带三处醒目标记。审查者会拒绝任何移除其中任意一处的 diff。
+
+1. **Cargo manifest:**
+   [`services/cursor_codec/Cargo.toml`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/Cargo.toml)
+   带有 `[package.metadata.experimental]`,其中 `reason` 字符串精确为
+   `Reverse-engineered Cursor wire protocol. Breaks on
+   vendor release.`
+2. **Stderr 横幅:** 每个编解码器公开入口都会调用
+   `assert_experimental_banner_emitted()`,每个进程首次使用时向 stderr 打印:
+   ```
+   [EXPERIMENTAL] cursor-mitm codec active. Codec break SLA:
+   docs/customer/sow-cursor-mitm.md. DO NOT SHIP IN GA CONFIG.
+   ```
+3. **SOW 补充条款文档:**
+   [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/SOW.md)
+   在显眼位置标注 `Status: EXPERIMENTAL — SOW only`,front-matter 里带
+   `noindex: true`,并把 `DO NOT SHIP AS A GA FEATURE` 这句原文作为
+   顶层 callout 放出来。
+
+## 失效窗口 SLA(Break-Window SLA)
+
+SOW 补充条款里要填:
+
+| 字段 | 客户侧取值 |
+|-------|---------------------|
+| 编解码器失效检测窗口 | 一般 ≤Cursor 发版后 24 小时 |
+| 编解码器修复周转目标 | 一般 ≤5 个工作日 |
+| 客户升级联系人 | on-call 渠道 |
+| SpendGuard 升级联系人 | SpendGuard customer-success on-call |
+| 已测试的 Cursor 客户端版本区间 | 交付时的 Cursor IDE 最低/最高版本 |
+
+编解码器失效时,SpendGuard 会(按客户的主机端抓包流程)重新抓取最新的
+Cursor 线字节,刷新 proto description 和 fixture corpus,然后重新发布一个
+带 feature flag 的构建。客户在自己的变更管理窗口内重新部署。
+
+## 密封式密钥模型(Sealed-secret credential model)
+
+客户的 Cursor 会话 bearer token 对编解码器端到端不透明,它们原样从 Cursor
+IDE 二进制流到 `api.cursor.sh`;编解码器**不会**解密、记录或持久化它们。
+按 POST_GA_03 的 tenant 脱敏策略,审计链会把 `model` / `max_tokens` /
+`temperature` 以外的消息体字段全部脱敏。
+
+编解码器不引入任何新的长期密钥。一旦为该 SOW 部署扩展了 leaf cert 的 SAN,
+D02 trust store 就覆盖 `api.cursor.sh`。
+
+## 运营方威胁模型(Operator threat model)
+
+编解码器是**尽力而为的 gating**,不是硬策略闸门。当编解码器看不懂线上字节的结构时
+(因为 Cursor 改了协议),egress proxy **会释放持有的预留,放行该调用**。
+这跟编解码器遇到未知的 Cursor model 字符串时是同一套处理方式。失败会大声示警
+(decode-error 指标 + stderr 横幅 + 结构化日志),但**不会**阻断客户的
+Cursor 会话。
+
+完整的威胁模型表见
+[`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/SOW.md)
+§4。
+
+## Demo
+
+一个基于 fixture 的 demo,用四份合成的 `.cursor-rpc` fixture
+(multi-turn / tool calls / error response / long stream)端到端验证编解码器
+的正确性。这个 demo **不会**启动 Cursor IDE 二进制,也**不会**碰
+`api.cursor.sh`:
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=cursor_mitm_fixture
+```
+
+demo 的
+[`README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/cursor_mitm_fixture/README.md)
+记录了分层流水线(framing decode → envelope decode → translation →
+mock sidecar reserve+commit → 逐字节保留 → counting-stub POST),以及它跟
+假想的"启动 Cursor 二进制"型 demo 之间的差异。
+
+客户的部署会用自己验证过的抓包路径,对实时 Cursor 流量跑同一套编解码器。
+这个 demo 只在隔离环境里证明编解码器的正确性。
+
+## 局限
+
+- **实时 Cursor 流量不进 CI。** 只用录制好的 fixture。真实抓包证据存放在
+  SOW 客户侧的产物里。
+- **不覆盖 Cursor 的非 Agent 界面。** Tab 自动补全和 Cmd-K 行内编辑都不在
+  范围内;只有 Agent 界面被 gating。
+- **尽力而为的 gating,不是硬 fail-closed。** 看不懂的线上字节会释放并放行;
+  编解码器会大声示警,但它不阻断客户的 Cursor 会话。
+- **版本锁定。** 每份 fixture 都打了 Cursor 客户端版本区间标签。对落在已测
+  窗口之外的实时 Cursor 版本回放,会返回 503 并带 `X-SpendGuard-Codec-Break`
+  头。
+- **Windsurf 编解码器是独立的 D18** —— 不在 D17 范围内。
+
+## 相关
+
+- [Quickstart](../../quickstart/) —— 5 分钟拉起完整 SpendGuard 栈
+- [Contract YAML reference](../../contracts/yaml/) —— 编写 allow/stop 规则
+- 其他适配器集成:[Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [Kong AI Gateway](../kong-ai-gateway/) · [Dify](../dify/) · [LiteLLM SDK shim](../litellm-sdk-shim/)

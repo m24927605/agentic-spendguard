@@ -1,0 +1,267 @@
+---
+title: "Inngest AgentKit (TypeScript) — wrapWithSpendGuard(step.ai)"
+description: >-
+  把 Agentic SpendGuard 作为 wrapper 装到任意 @inngest/agent-kit 的
+  step.ai 命名空间上。在 Inngest function 内通过
+  `wrapWithSpendGuard(step.ai, client, opts)` 即插即用。上游 HTTP 请求发出前先做
+  budget reservation,调用后再用 commit 对账真实 token 用量,
+  并借 Inngest 的 step 标识复用做到 retry-safe。
+---
+
+
+> [Inngest AgentKit](https://github.com/inngest/agent-kit) 把每次
+> LLM 调用都包成一个 durable step,走 `step.ai.infer()` / `step.ai.wrap()`。
+> Inngest 的确定性重试契约给了 SpendGuard 在 TypeScript 里最干净的
+> pre-call hook:失败时同一段 step body 会用同一个 `step.id` 重跑一遍,
+> 并(在你提供时)沿用同一个 `step.idempotencyKey`。SpendGuard 以
+> `wrapWithSpendGuard(step.ai, client, opts)` 的形式发布 —— 一个现成的工厂方法,
+> 你把它套到任意 Inngest function 的 `step.ai` 上,再把结果交还给 function body 即可。
+> 不需要任何 wrapper 类。SpendGuard 的 `idempotencyKey` 是从 Inngest 自身的
+> step 标识确定性派生出来的,所以 N 次重试在 SpendGuard 审计链里会合并成同一个
+> 逻辑决策。
+
+## 安装
+
+```bash
+pnpm add @spendguard/sdk @spendguard/inngest-agent-kit @inngest/agent-kit inngest
+```
+
+`@spendguard/sdk` 和 `@inngest/agent-kit` 声明为 peer dependencies,适配器两边都不锁版本
+—— 以你项目的 lockfile 为准。要求 Node 20.10+(底层用到了稳定版的
+`AsyncLocalStorage`)。
+
+## 快速上手
+
+最小可用的端到端接线 —— 把 `SpendGuardClient` 连到 sidecar 的 UDS,包住 function 的
+`step.ai`,然后在 function body 里调 `sgStep.infer(...)`:
+
+```ts
+import { Inngest } from "inngest";
+import { openai } from "@inngest/agent-kit/models";
+import { SpendGuardClient, InMemoryIdempotencyCache } from "@spendguard/sdk";
+import { wrapWithSpendGuard } from "@spendguard/inngest-agent-kit";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "inngest-agent-kit",
+});
+await client.connect();
+await client.handshake();
+
+const cache = new InMemoryIdempotencyCache();
+const inngest = new Inngest({ id: "my-app" });
+
+export const agentFn = inngest.createFunction(
+  { id: "agent-fn", retries: 2 },
+  { event: "agent/run" },
+  async ({ step }) => {
+    const sgStep = wrapWithSpendGuard(step.ai, client, {
+      tenantId: "00000000-0000-4000-8000-000000000001",
+      budgetId: "44444444-4444-4444-8444-444444444444",
+      idempotencyCache: cache,
+      claimEstimator: ({ model, body }) => [{
+        scopeId: "44444444-4444-4444-8444-444444444444",
+        amountAtomic: "1000000",
+        unit: { unit: "USD_MICROS", denomination: 1 },
+      }],
+    });
+    return await sgStep.infer("call-openai", {
+      model: openai({ model: "gpt-4o-mini" }),
+      body: { messages: [{ role: "user", content: "hi" }] },
+    });
+  },
+);
+```
+
+每次 `sgStep.infer(...)` 调用都会发生这些事:
+
+1. wrap 从 Inngest 的运行时上下文派生出一组 SpendGuard 身份元组
+   `(decisionId, idempotencyKey, llmCallId, stepId)`。`decisionId` 和
+   `idempotencyKey` 取种子自 `step.idempotencyKey ?? step.id` —— 按 Inngest
+   自身契约,这两者跨重试都不变。
+2. 如果传了 `idempotencyCache`,wrap 会先探它。缓存 HIT 时,缓存里的
+   `DecisionOutcome` 直接短路掉 sidecar 往返;MISS 时则落到
+   `client.reserve({ trigger: "LLM_CALL_PRE", … })`。
+3. 遇到 `DecisionDenied` / `DecisionStopped` / `DecisionSkipped` /
+   `ApprovalRequired`(且没有 resumer)/ `SidecarUnavailable`,适配器
+   会重新抛出 —— Inngest step body 抛异常,Inngest 把该 step 记为失败,
+   上游 LLM HTTP 请求绝不会发出本进程。**强制执行 review-standards §3.1 + §5。**
+4. 返回 `CONTINUE` 时,被包住的 `step.ai.infer(...)` 原样对内部命名空间执行。
+   重试 / replay 照旧由 Inngest 运行时编排。
+5. 内部 response 返回后,bracket 读取 `usage.total_tokens`(带跨提供商鲁棒性的
+   回退探测顺序),并通过 `client.commitEstimated(...)` 发出一条 `SUCCESS`
+   commit。提供商报错 → commit 以 `outcome="PROVIDER_ERROR"` 发出,然后把错误重新抛出。
+
+## 重试去重 —— 最核心的契约
+
+Inngest 用**同一个 `step.id`** 重跑同一段 step body(传了
+`step.idempotencyKey` 时连它也一样)。适配器把这个标识喂进 SpendGuard 的
+`idempotencyKey` 派生逻辑,于是:
+
+- **第 0 次尝试**对 sidecar 发起 `reserve`。
+- **第 1 次起的重试**重新派生出**同一个** key。传了 `idempotencyCache` 时,
+  缓存里的 `DecisionOutcome` 短路掉 sidecar 往返;没传时,由 sidecar 自身的
+  去重层吸收掉这个重复请求。
+- SpendGuard 审计链跨 N 次尝试只记**一行** `LLM_CALL_PRE` —— 重试不会重复计费。
+
+```ts
+// retries: 2 means up to 3 attempts (0 + 2 retries).
+inngest.createFunction({ id: "agent-fn", retries: 2 }, ...);
+```
+
+同名 step 在**一次全新的 Inngest function 调用**(新 `ctx.runId`)里会产生
+**不同的** `idempotencyKey` —— 新 run 不会跟之前的 run 互相去重。身份元组把
+`runId` 作为作用域封印纳入其中。
+
+`attempt` 是有意不参与种子的(review-standards §6.5 —— 已有分支覆盖)。
+
+## 配置
+
+<table>
+  <thead>
+    <tr><th>选项</th><th>类型</th><th>是否必填</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>tenantId</code></td><td><code>string</code></td><td>是</td><td>计费归属的租户 UUID。idempotency-key 规范元组的第一个字段。</td></tr>
+    <tr><td><code>budgetId</code></td><td><code>string</code></td><td>否</td><td>用作投影 claim 的 <code>scopeId</code> 的预算 UUID。未设置时适配器回退到 <code>tenantId</code>。</td></tr>
+    <tr><td><code>windowInstanceId</code></td><td><code>string</code></td><td>否</td><td>可选的预算窗口 UUID。设置后会转发给底层。</td></tr>
+    <tr><td><code>unit</code></td><td><code>UnitRef</code></td><td>否</td><td>commit 路径上默认 <code>&lbrace; unit: "USD_MICROS", denomination: 1 &rbrace;</code>。</td></tr>
+    <tr><td><code>pricing</code></td><td><code>PricingFreeze</code></td><td>否</td><td>未设置时默认 empty-freeze;由 sidecar 服务端默认值接管。</td></tr>
+    <tr><td><code>claimEstimator</code></td><td><code>ClaimEstimator</code></td><td>否</td><td>把 <code>ClaimEstimatorInput</code> 映射成 <code>readonly BudgetClaim[]</code>。默认:zero-amount 探测 claim。生产环境消费方必须覆盖。</td></tr>
+    <tr><td><code>route</code></td><td><code>string</code></td><td>否</td><td>默认 <code>"llm.call.inngest"</code>(LOCKED,design.md §4)。</td></tr>
+    <tr><td><code>callSignatureFn</code></td><td><code>CallSignatureFn</code></td><td>否</td><td>可选的签名覆盖。默认:由 step 标识驱动派生。</td></tr>
+    <tr><td><code>claimEstimate</code></td><td><code>ClaimEstimate</code></td><td>否</td><td>更高保真度的数值提示,在 reserve 请求上原样转发。</td></tr>
+    <tr><td><code>onApprovalRequired</code></td><td><code>(err, input) =&gt; Promise&lt;DecisionOutcome|null|undefined&gt;</code></td><td>否</td><td>用所给的 outcome 恢复 <code>ApprovalRequired</code>;返回 <code>null</code>/<code>undefined</code> 则重新抛出。</td></tr>
+    <tr><td><code>idempotencyCache</code></td><td><code>IdempotencyCache</code></td><td>否</td><td>同进程缓存(通常是 <code>@spendguard/sdk</code> 里的 <code>InMemoryIdempotencyCache</code>)。驱动重试去重的短路;没有它时,sidecar 自身的去重层仍提供分层防护。</td></tr>
+  </tbody>
+</table>
+
+## 限制
+
+**SpendGuard 的 Inngest AgentKit 适配器只做 pre-call reserve + post-call
+commit。** 把它摆到高吞吐、重试密集的工作负载前面之前,有几件要紧事得先搞清楚:
+
+- **逐 chunk 的 stream 门控不在 v0.1.x 范围内。** `step.ai.infer` 按 Inngest
+  的设计就是非流式的(`design.md` §3 non-goal)。D04 / D06 / D08 组合 demo 里的
+  `STREAM` 步骤,在 D29 组合里被换成了 `RETRY_DEDUP` —— retry-safe 的 reserve
+  去重才是 D29 最核心的契约。
+- **重试去重的短路要么靠 `idempotencyCache`,要么靠 sidecar 侧去重。** 没有进程内缓存时,
+  wrap 仍会在每次尝试上向 sidecar 发出字节一致的 `idempotencyKey` —— 由 sidecar
+  自身的幂等层抓住重复。进程内缓存是推荐配置(每次重试省一次 UDS 往返),
+  但分层防护才是真正的安全保证。
+- **跨 step 的预算执行不在范围内。** 适配器是逐 step 门控的。多 step 的预算契约归
+  SpendGuard 的契约层管(见 [Contract YAML reference](../../contracts/yaml/))。
+- **审批恢复 UI 不在范围内。** 提供了 `onApprovalRequired` 回调时,`ApprovalRequired`
+  会流到消费方的这个回调里;适配器本身不带审批 UI。Inngest function 的失败处理逻辑
+  能观察到这个错误,并把它路由到你的运维控制台。
+- **`SidecarUnavailable` 原样向上传播。** 严格模式是默认(review-standards §5.2 /
+  §5.7)。将来的 `degrade=auto` 模式在 v0.1.x 里 LOCKED OUT(明确锁死禁用)。
+- **不支持浏览器**(D05 §6,UDS-only)。适配器只在有 `AsyncLocalStorage` 的
+  Node 20.10+ 下运行。
+
+## Demo
+
+随附的 docker-compose demo 会对着 sidecar + counting-stub 上游,端到端跑通完整的
+ALLOW + DENY + RETRY_DEDUP 矩阵:
+
+```bash
+make demo-up DEMO_MODE=inngest_agent_kit
+```
+
+该模式拉起 `postgres + sidecar + inngest-agent-kit-runner + counting-stub`,
+然后从 [`examples/inngest-agent-kit/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/inngest-agent-kit/)
+的 Node 示例里跑三次调用:
+
+- **ALLOW** —— 预算内的小消息。`wrapWithSpendGuard` 的 `reserve()` 返回
+  `CONTINUE`,上游 HTTP 调用发出,计数器 `+1`,bracket 发出一条 `SUCCESS` commit。
+- **DENY** —— body 里带 `spendguard_estimate_override=2000000000`,冲破了预置的
+  `1B` 硬上限。sidecar 契约求值器发出 `SPENDGUARD_DENY`,bracket 抛
+  `DecisionDenied`,被包住的 `step.ai.infer` 在上游 HTTP 调用之前就停住。
+  counting-stub 计数器不变(证明门控是 pre-call 触发的)。
+- **RETRY_DEDUP** —— driver 用同一个 `(runId, step.id, idempotencyKey)`、
+  递增的 `step.attempt`,把同一段 step body 重放 3 次。SpendGuard 的 reserve 在
+  3 次尝试里精确只触发一次。counting-stub 计数器 `+3`(每次尝试一次 ——
+  上游 HTTP 层照样会发;去重发生在它之上的 SpendGuard reservation 层)。
+  SQL 门控 `COV_D29_DEDUP_GATE` 断言 ledger 总共只看到 2 条 reservation
+  (ALLOW + RETRY_DEDUP)—— 不是 4 条(ALLOW + 3 次尝试)。
+
+干净跑通时的成功行(LOCKED —— CI 会精确 grep 这串拼写):
+
+```
+[demo] inngest_agent_kit ALL 3 steps PASS (ALLOW + DENY + RETRY_DEDUP)
+```
+
+完整细节和 verify-SQL 门控见
+[`deploy/demo/inngest_agent_kit/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/inngest_agent_kit/README.md)。
+
+独立的 `--mock` 模式(不需要 sidecar)对着同一个工厂 + 一个进程内的
+`SpendGuardClient` 替身运行:
+
+```bash
+cd examples/inngest-agent-kit
+pnpm install
+node index.mjs --mock
+```
+
+mock 模式显式断言了「DENY ⇒ 内层 step.ai 绝不会被调用」这条不变式,以及
+「N 次重试尝试 → 1 条 SpendGuard reservation」这条核心契约,任一被破坏就以非零退出。
+
+## 排错
+
+常见的启动期和首次调用错误。底层的类型化异常从
+`@spendguard/inngest-agent-kit` 重新导出,所以你不用再加一个 import 就能对
+`DecisionDenied` / `SidecarUnavailable` 做模式匹配。
+
+- **`DecisionDenied: reserve() denied by contract`** —— 预算耗尽或某条契约规则
+  发出了 `SPENDGUARD_DENY` 时的预期行为。bracket 重新抛出,Inngest step body
+  抛异常,上游 LLM HTTP 调用绝不触发。去 sidecar 日志里查命中的是哪条规则;
+  ledger 里的决策行带有 `decision_context.contract_rule`。
+
+- **预算门控没拦住 —— LLM 调用照样发出去了。** 几乎都是因为
+  `wrapWithSpendGuard(...)` 没被接进 function body。检查 `sgStep` 变量 —— 它
+  必须是被包住的 `step.ai`,而不是 Inngest 通过 `({ step })` 解构传进来的原始
+  `step.ai` 引用。
+
+- **重试产生了 N 条 reservation 而不是 1 条。** 要么是消费方没提供
+  `idempotencyCache` 且 sidecar 的幂等层配错了,要么是每次重试不知怎么拿到了
+  一个全新的 `runId`(核对 Inngest function 的 `retries:` 设置 —— Inngest
+  默认跨重试复用 `runId`)。`deploy/demo/verify_step_inngest_agent_kit.sql` 里的
+  `COV_D29_DEDUP_GATE` SQL fixture 是这条的标准回归测试。
+
+- **`SidecarUnavailable: handshake timeout`** —— sidecar 的 UDS 路径
+  (`SPENDGUARD_SIDECAR_UDS`,默认 `/var/run/spendguard/adapter.sock`)连不上。
+  确认 sidecar 容器已起、socket 文件存在,且你的 Node 进程对它有读写权限。
+
+- **`ApprovalRequired` 传播了出去,但你的恢复回调没触发。** `onApprovalRequired`
+  选项必须返回一个 `DecisionOutcome`(不能是 null/undefined)才能恢复。返回 `null`
+  会让原始错误原样传播 —— `Runner.run(...)` 停住,step body 报错出去,交给 Inngest
+  的重试层去观察。
+
+- **commit 上的 token 计数对不上提供商上报的数。** bracket 的
+  `extractTotalTokens(result)` 按顺序探测 `result.usage.total_tokens` →
+  `result.usage_metadata.total_tokens` →
+  `result.response_metadata.token_usage.total_tokens`。三者都没有时(罕见,
+  防御性回退),commit 对缺失字段发 `0` —— 去查一下提供商的原始 response 结构。
+
+- **类标识检查失败:`err instanceof DecisionDenied` 为 false** —— 你直接从
+  `@spendguard/sdk` 导入了 `DecisionDenied`,而 wrap 是从
+  `@spendguard/inngest-agent-kit` 抛出的。类标识是保留的(重新导出,不是子类),
+  所以不管你用哪个 import 检查都成立。如果检查失败,怀疑你的 `node_modules` 树里有
+  重复的 `@spendguard/sdk`。
+
+## 相关链接
+
+- [Quickstart](../../quickstart/) —— 5 分钟拉起完整 SpendGuard 栈。
+- [LangChain.js callback handler](../langchain-ts/) —— LangChain.js
+  回调处理器版的配套适配器。
+- [Vercel AI SDK (covers Mastra)](../vercel-ai/) —— Vercel AI 中间件版的配套适配器。
+- [OpenAI Agents SDK (TypeScript)](../openai-agents-ts/) —— OpenAI Agents
+  SDK TS 版的配套适配器。
+- [Contract YAML reference](../../contracts/yaml/) —— 编写 allow/stop 规则。
+- 其他适配器集成:
+  [Pydantic-AI](../pydantic-ai/) ·
+  [LangChain & LangGraph (Python)](../langchain/) ·
+  [OpenAI Agents SDK (Python)](../openai-agents/) ·
+  [Microsoft AGT](../agt/) ·
+  [LiteLLM proxy guardrail](../litellm-proxy/)

@@ -1,0 +1,160 @@
+---
+title: "Langflow 自定义组件 — spendguard-langflow-component"
+description: >-
+  给 Langflow 1.8+ 里跑的任意 LangChain 聊天模型加一张拖拽式预算闸口卡片。
+  SpendGuardChatModelWrapper 卡片在每次模型调用前通过 SpendGuard sidecar
+  预留额度,调用结束后再提交真实用量。默认 fail-closed。PyPI 安装。
+---
+
+
+> [Langflow](https://github.com/langflow-ai/langflow)（DataStax,MIT,
+> 约 80k star）是给 LangChain Python 流程做的可视化编排器。操作者拖拽
+> 节点;每个 LLM 节点持有一份单节点的 `BaseChatModel` 配置
+>（`ChatOpenAI`、`ChatAnthropic` 等）。SpendGuard 组件以独立 PyPI 包
+> 形式发布 —— `spendguard-langflow-component` —— 因为 Langflow 是从
+> `$LANGFLOW_COMPONENTS_PATH` 加载自定义组件的,而不是从 spendguard-sdk
+> 的安装目录树。把一个 `ChatOpenAI` 节点拖进 wrapper 的 **Inner Model**
+> 输入口即可。下游节点拿到的是一个带预算闸口的 `LanguageModel` 句柄,
+> 跟裸的 `ChatOpenAI` 完全没法区分。
+
+## 为什么 Langflow 要用 SpendGuard
+
+今天一套对接 OpenAI / Anthropic / Vertex 的自托管 Langflow 栈,**没有任何
+预算原语**,没有签名审计链,也没有调用前的费用闸口。Langflow 的组件元数据
+系统给了我们一个一等公民的画布卡槽位 —— 这是可视化编排器这一品类里最干净
+的扩展点。SpendGuard 组件做的事:
+
+- 在内层模型发出上游 HTTP **之前**,就按操作者配置的预算预留预估花销。
+  DENY 直接跳过上游 —— 画布上冒出一个错误节点,提供商一个 token 都不计费。
+- 调用结束时从响应的 usage 帧里提交真实的 `total_tokens`。INV-5。
+- 把审计链里的每个决策都打上
+  `integration=langchain, source=langflow` 标签,这样 SpendGuard 操作者
+  就能把 Langflow 驱动的调用和裸 LangChain SDK 调用方区分开。
+- 把 `DecisionDenied` / `DecisionSkipped` 暴露成 Langflow 运行时错误 ——
+  默认 fail-closed。`SPENDGUARD_LANGFLOW_FAIL_OPEN=1` 沿用了各集成统一的
+  逃生口约定。
+
+## 安装(PyPI）
+
+```bash
+pip install spendguard-langflow-component
+spendguard-langflow-install --target $LANGFLOW_COMPONENTS_PATH
+```
+
+重启 Langflow。画布调色板的 **Models** 分类下会出现 **SpendGuard Budget Gate**
+卡片。把它拖到你的流程里,再把一个 `ChatOpenAI` / `ChatAnthropic` /
+`ChatVertexAI` 节点接到 **Inner Model** 输入口。
+
+这个包依赖 `spendguard-sdk[langchain]>=0.5.1` 和
+`langflow>=1.8.0,<2.0.0`。`spendguard-langflow-install` CLI 拒绝往系统
+路径(`/usr`、`/etc`、`/System`……)写,所以哪怕 `--target` 配错了,也不会
+搞坏你的 Langflow 安装目录树。
+
+## 安装(气隙环境 / vendor-drop)
+
+当 `pip install` 不可用时(离线操作者、镜像内置部署):
+
+```bash
+# Clone the SpendGuard repo or download a release tarball.
+git clone https://github.com/michael-chen/agentic-spendguard
+cd agentic-spendguard/plugins/langflow
+
+# Drop the component shim + metadata into your Langflow tree.
+cp src/spendguard_langflow/metadata/spendguard_chat_model_wrapper.yaml \
+   $LANGFLOW_COMPONENTS_PATH/
+
+# The shim re-imports the installed package; ensure spendguard-sdk +
+# this plugin are pip-installable from your offline wheel cache.
+pip install --no-index --find-links wheels/ \
+  'spendguard-sdk[langchain]>=0.5.1' \
+  spendguard-langflow-component
+```
+
+## 画布输入
+
+| 输入 | 类型 | 必填 | 默认 |
+|---|---|---|---|
+| `inner` | `LanguageModel` 句柄 | 是 | -- |
+| `sidecar_uds_path` | text | 是 | `/run/spendguard/sidecar.sock`(回退到环境变量 `SPENDGUARD_SIDECAR_UDS`) |
+| `tenant_id` | secret | 是 | -- |
+| `budget_id` | text | 是 | -- |
+| `window_instance_id` | text | 是 | -- |
+| `unit_token_kind` | text(advanced) | 否 | `output_token` |
+| `model_family` | text(advanced) | 否 | `gpt-4` |
+| `claim_estimator_chars_per_token` | int(advanced) | 否 | `4` |
+
+## 行为矩阵
+
+| 路径 | 发生什么 |
+|---|---|
+| Sidecar **ALLOW** | `_agenerate` 预留 -> 发出上游 -> 提交真实 `total_tokens`。 |
+| Sidecar **DENY** | 在任何上游 HTTP 之前抛 `DecisionDenied`。画布冒出错误节点;提供商零 token。(INV-1) |
+| Sidecar **DEGRADE**(默认 fail-closed) | 抛 `DecisionSkipped`;画布冒出错误节点。 |
+| `SPENDGUARD_LANGFLOW_FAIL_OPEN=1`(仅限开发) | DEGRADE 回退到直接发出;记 WARN 日志。不要用在生产。 |
+| 流式(`astream`) | 同样先预留再调用;commit 在流末从最后一个 chunk 的 usage 帧触发。 |
+| 调用方绑定的 `run_context(...)` | 自动绑定变成 no-op;用调用方的 `run_id`。(INV-3) |
+
+## 与 egress proxy 的取舍矩阵
+
+你也可以在网络层用 SpendGuard egress proxy 给 Langflow 支出加闸(在 Langflow
+容器上设 `OPENAI_BASE_URL=http://egress-proxy:9000/v1`)。两条路径最终都汇入
+同一条审计链;按拓扑选:
+
+| 什么场景 | 选哪条 |
+|---|---|
+| 你自己掌控 Langflow 运行时,且想要一张对流程作者可见的一等公民画布组件。 | `spendguard-langflow-component` |
+| Langflow 作为托管黑盒运行,且你想要画布侧零配置。 | egress proxy `OPENAI_BASE_URL` |
+| 你想在审计链里拿到每个流程的 `flow_id`。 | `spendguard-langflow-component`(自动绑定的 `run_context`) |
+| 你想用一份配置盖住 Langflow 加上所有其他拨向同一个提供商 URL 的租户工具。 | egress proxy |
+| 你在用 Langflow v1.8+ 的全局模型提供商配置(整个流程一个模型)。 | 今天用 egress proxy;组件 v1.1 会做拦截。 |
+
+## 限制(v1)
+
+- **不对 embeddings / 检索 / 工具节点加闸。** 预算闸口只在 LLM 调用边界
+  触发。RAG、向量库、工具节点都不在范围内。
+- **没有逐 token 的流中途封顶。** 只有流末 commit。sidecar 仍然能下一个
+  硬性的调用前封顶;流中途打断需要 Langflow 提供流式 hook 的挂载点,而那东西
+  目前还不存在。
+- **全局模型提供商配置的拦截推迟到 v1.1。** Langflow 1.8 加了一个流程级
+  的模型设置;v1 的 D36 只包到单节点级。依赖全局配置的操作者应该把 wrapper
+  和 egress proxy 配对使用。
+- **没有往 Langflow Cloud(DataStax 托管)市场推送。** 安装面是 PyPI;
+  Cloud 市场推送是后续项。
+- **每流程的预算 ID 只从画布输入读。** 从 Langflow 流程元数据里拉预算 ID
+  这件事推后。
+- **`langflow>=1.8.0,<2.0.0` 下限。** v1.7 缺少 wrapper 依赖的稳定
+  `HandleInput` + `LanguageModel` 句柄支持。
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=langflow_real
+```
+
+拉起 SpendGuard 基础栈(postgres / ledger / sidecar /
+canonical-ingest / outbox-forwarder),外加一个网络内计数桩和一个
+Python 3.12 runner,用一个 3 步矩阵(ALLOW + DENY + STREAM)去跑组件的
+`build_model_sync` + `ainvoke` 生命周期。这个矩阵在 SpendGuard ledger 层
+验证 INV-1(DENY 跳过上游)和 INV-5(提交真实用量);verify SQL 还断言
+`integration=langchain` + `source=langflow` 标签确实落进了
+`audit_outbox.decision_context`。
+
+这个 demo **不** 启动完整的 Langflow UI 镜像(约 1.2 GB)—— wrapper 的
+`build_model_sync` 就是 Langflow 组件运行时底层调用的那个关键卡点,所以直接
+驱动它就能证明 UI 流程 runner 会走的那套 reserve / commit / release 生命
+周期是同一套。完整理由见 compose overlay 里的 `DEVIATION` 说明。
+
+## 跟其他 SpendGuard 集成共存吗?
+
+可以。Langflow 组件和裸 `spendguard-sdk[langchain]` SDK 集成共用同一条
+SDK 代码路径(`spendguard.integrations.langchain.SpendGuardChatModel`)——
+审计结构和 ledger 语义完全一致。一个流程里某个节点用 Langflow 组件、另一个
+节点用 Python 脚本走 SpendGuard LangChain SDK,产出的审计行是同质的。它们
+也能跟 SpendGuard egress proxy 共存 —— 组件放行的任何提供商 HTTP,proxy
+都会再加闸,在网络边界补上第二道防线。
+
+## 源码
+
+- 组件包:[`plugins/langflow/`](https://github.com/michael-chen/agentic-spendguard/tree/main/plugins/langflow)
+- Demo overlay:[`deploy/demo/langflow_real/`](https://github.com/michael-chen/agentic-spendguard/tree/main/deploy/demo/langflow_real)
+- Spec:[`docs/specs/coverage/D36_langflow/`](https://github.com/michael-chen/agentic-spendguard/tree/main/docs/specs/coverage/D36_langflow)

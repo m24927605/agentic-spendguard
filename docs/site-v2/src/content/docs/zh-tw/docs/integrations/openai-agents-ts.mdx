@@ -1,0 +1,334 @@
+---
+title: "OpenAI Agents SDK (TypeScript) — withSpendGuard(model)"
+description: >-
+  把 Agentic SpendGuard 當成包在任何 @openai/agents Model 外層的 wrapper。
+  透過 `withSpendGuard(inner, { client, tenantId })` 直接 drop-in — 在上游 OpenAI
+  HTTP request 發出之前就先做 budget reservation，呼叫後再 commit 對帳真實的 token
+  用量，並留下簽章稽核軌跡。多框架的執行透過共用的 `runContext()` AsyncLocalStorage
+  共享同一條 trace。
+---
+
+
+> `@openai/agents` (TypeScript) 是 OpenAI 官方的 JS agent runtime。它的
+> `Model` 介面（`OpenAIChatCompletionsModel`、`OpenAIResponsesModel`）在結構上
+> 跟 Python SDK 一模一樣，所以 Python 那套 wrapper 做法（subclass `Model`、用
+> `reserve → call → commitEstimated` 把 `getResponse()` 包起來）可以乾淨地搬過來。
+> SpendGuard 出貨的形式是 `withSpendGuard(inner, opts)` — 一個現成的 factory，
+> 你把它套在任何 `@openai/agents` `Model` 上，再交給 `new Agent({ model })` 就好，
+> 不需要自己去 subclass model。不過如果你的 codebase 偏好 `instanceof` 檢查或 subclass
+> factory，也還有一個對等的 `SpendGuardAgentsModel` class 形式可用。
+
+## 安裝
+
+```bash
+pnpm add @spendguard/sdk @spendguard/openai-agents @openai/agents
+```
+
+`@spendguard/sdk` 和 `@openai/agents` 都宣告成 peer dependencies，所以 adapter 兩個
+都不會 pin 死版本 — 由你專案的 lockfile 說了算。需要 Node 20.10+（底層 substrate 用到
+`await using` 加上穩定版的 `AsyncLocalStorage`）。
+
+如果要打真的 OpenAI HTTP，標準的 `@openai/agents-openai` provider 會提供你要包起來的
+`OpenAIChatCompletionsModel` / `OpenAIResponsesModel`：
+
+```bash
+pnpm add @openai/agents-openai
+```
+
+## 快速上手
+
+最精簡的端到端接線 — 把 `SpendGuardClient` 連到 sidecar 的 UDS、組出包好的 model、
+交給 `new Agent({ model })`，再透過 `Runner.run(agent, ..., runContext)` 跑起來：
+
+```ts
+import { Agent, Runner } from "@openai/agents";
+import { OpenAIChatCompletionsModel, OpenAIProvider } from "@openai/agents-openai";
+import { SpendGuardClient, newUuid7 } from "@spendguard/sdk";
+import { withSpendGuard, runContext } from "@spendguard/openai-agents";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "openai-agents-ts",
+});
+await client.connect();
+await client.handshake();
+
+const provider = new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY });
+const inner = new OpenAIChatCompletionsModel(provider.openaiClient, "gpt-4o-mini");
+const guarded = withSpendGuard(inner, {
+  client,
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  budgetId: "44444444-4444-4444-8444-444444444444",
+});
+
+const agent = new Agent({
+  name: "my-budget-aware-agent",
+  instructions: "Reply concisely.",
+  model: guarded,
+});
+
+try {
+  const runId = newUuid7();
+  const result = await runContext({ runId }, () =>
+    Runner.run(agent, "Say hello in three words."),
+  );
+  console.log("Runner.run OK", { runId, output: result.finalOutput });
+} finally {
+  await client.close();
+}
+```
+
+每一次 `Runner.run(...)` 呼叫實際發生的事情：
+
+1. `withSpendGuard` factory 的 `getResponse(request)` 會從
+   `(request.input, request.systemInstructions)` 推出一個穩定的 BLAKE2b-128 簽章，
+   透過 substrate 的 `deriveUuidFromSignature(...)` 鑄出一組決定性的
+   `(decisionId, llmCallId)`，再用 `deriveIdempotencyKey({ tenantId, sessionId:
+   runId, runId, stepId, llmCallId, trigger: "LLM_CALL_PRE" })` 組出 idempotency key。
+2. 接著 `client.reserve({ trigger: "LLM_CALL_PRE", projectedClaims, … })` 帶著一個
+   per-model 的 baseline `BudgetClaim` 發出去（從 `MODEL_BASELINE_TOKENS` 表查；查不到
+   的 model 一律退回 800 tokens）。
+3. 碰到 `DecisionDenied` / `DecisionStopped` / `ApprovalRequired` 時，adapter 會把例外
+   重新拋出 — `Runner.run(...)` 會在 inner Model 的 `getResponse(...)` HTTP 呼叫發出
+   **之前**就停住。**Reviewer gate 1.3 有強制執行**：任何非 CONTINUE 的路徑上，
+   `inner.callCount` 都會維持在 `0`。
+4. 走到 `CONTINUE` 時，會原封不動地拿同一個 request 去呼叫 inner Model（不改任何
+   欄位）。Runner 照常去編排 tool calls / handoffs。
+5. inner response 回來之後，bracket 會去讀 `usage.totalTokens`（為了跨 provider 的穩健，
+   AI SDK v4 的標準 camelCase 跟 snake_case 兩種形狀都接受），再透過
+   `client.commitEstimated(...)` 送出一個 `SUCCESS` commit。如果是 provider error，
+   commit 會帶 `outcome="PROVIDER_ERROR"` 送出，然後把那個 error 重新拋出。
+
+## Class 形式 — `SpendGuardAgentsModel`
+
+Class 形式是給那些偏好 subclass factory、或需要 `instanceof` 檢查的 codebase 用的
+對等介面。兩種介面都會委派到同一個 `bracketedGetResponse(...)` 共用核心，所以 bracket
+的行為在兩者之間絕對不會走鐘 — 這是 review-standards §1.2 的 reviewer gate。
+
+```ts
+import { SpendGuardAgentsModel, runContext } from "@spendguard/openai-agents";
+
+const guarded = new SpendGuardAgentsModel({
+  inner,
+  client,
+  tenantId: "tenant-prod",
+  budgetId: "budget-team-7",
+});
+```
+
+## 共用的 `runContext()` — 跨框架共享一條 trace
+
+一個多框架的 agent（LangChain.js + Vercel AI + Agents SDK 跑在同一個 Node process 裡）
+理應只有一條 trace。SpendGuard 用單一個 `AsyncLocalStorage` 來撐起 `runContext()`，
+key 是 `Symbol.for("@spendguard/run-context/v1")` — 每個 adapter（D04 / D06 / D08 /
+D29）都從 global registry 匯入同一個 Symbol，所以不管是哪個框架驅動的，單一個
+`runContext({ runId }, …)` scope 都能貫穿底下每一個巢狀的 LLM 呼叫。
+
+```ts
+const runId = newUuid7();
+await runContext({ runId }, async () => {
+  // LangChain.js call — handler.handleChatModelStart reads the SAME runId.
+  await chat.invoke([new HumanMessage("hello")]);
+  // Vercel AI call — middleware.transformParams reads the SAME runId.
+  await generateText({ model: wrappedAi, prompt: "hi" });
+  // OpenAI Agents call — withSpendGuard reads the SAME runId.
+  await Runner.run(agent, "Say hi");
+});
+```
+
+> **命名提醒**：`@openai/agents` 自己也匯出了一個叫 `RunContext` 的 type，用來描述
+> OpenAI runner 串過各個 tool 的 per-run 狀態。為了避免撞名，挑一個 alias 掉：
+>
+> ```ts
+> import type { RunContext as SpendGuardRunContext } from "@spendguard/openai-agents";
+> import { RunContext } from "@openai/agents";
+> ```
+
+## 設定
+
+v0.1.0 的 options 介面是刻意收窄的。設計上預期會有更豐富的
+`unitId` / `windowInstanceId` / pricing / `claimEstimator` 形狀，目前先延後（見下方
+**限制**）— 在 substrate 把 `UnitRef` 拓寬之前，adapter 會投射出合理的 defaults。
+
+<table>
+  <thead>
+    <tr><th>選項</th><th>型別</th><th>必填</th><th>說明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>client</code></td><td><code>SpendGuardClient</code></td><td>YES</td><td>從 <code>@spendguard/sdk</code> 設定好的 substrate client。adapter 不負責 client 的生命週期 — 由使用方自己去呼叫 <code>connect()</code> / <code>handshake()</code> / <code>close()</code>。</td></tr>
+    <tr><td><code>tenantId</code></td><td><code>string</code></td><td>YES</td><td>這次呼叫要記帳到哪個 tenant UUID。會轉發給 substrate 當作 <code>reserve()</code> 的 claim scope，同時也是 idempotency-key 標準 tuple 的第一個欄位。</td></tr>
+    <tr><td><code>budgetId</code></td><td><code>string</code></td><td>NO</td><td>用來當投射 claim 的 <code>scopeId</code> 的 budget UUID。沒設的話，adapter 會退回用 <code>tenantId</code> 當 scopeId。</td></tr>
+  </tbody>
+</table>
+
+未來的某個 minor（`v0.x`）會等 substrate 把 `UnitRef` 拓寬之後，照 design.md §4 的
+superset（`windowInstanceId`、`unit`、`pricing`、`claimEstimator`）逐欄把這個介面擴出去。
+這些擴充都是 additive 的 optional 欄位 — 不會對 v0.1.0 的形狀造成破壞性變更。
+
+## 預設 claim 投射（`MODEL_BASELINE_TOKENS`）
+
+沒有給 `claimEstimator` 時（也就是 v0.1.0 的介面），bracket 會投射出單一個 per-model
+的 baseline `BudgetClaim`：
+
+| Model           | Baseline (tokens) |
+| --------------- | ----------------- |
+| `gpt-4o-mini`   | 500               |
+| `gpt-4o`        | 1500              |
+| `gpt-4.1-mini`  | 500               |
+| `gpt-4.1`       | 1500              |
+| `o1`            | 3000              |
+| `o3-mini`       | 1500              |
+| `o3`            | 3000              |
+| _unknown_       | 800               |
+
+這些數值跟 `design.md` §11 那張字面表是 byte-identical 的。TS adapter 在 v0.1.x 出的是
+字面數字版；per-model 的 tokenizer dispatch（Strategy A — 也就是 Python 兄弟版的 v0.5.x
+擴充）會在未來某個 TS minor 以 additive optional 的方式登場。在過渡期間，使用者自己提供的
+`claimEstimator`（也就是未來的 `v0.x` options 介面）就是那個逃生口。
+
+## 限制
+
+**SpendGuard 的 OpenAI Agents TS adapter 只做 pre-call reserve + post-call commit。**
+bracket 在 inner OpenAI HTTP 呼叫**之前**做 gate，在 `inner.getResponse(...)` 回來
+**之後**做 commit。在你把它擺到串流量很大的工作負載前面、或是想倚賴完整設計介面之前，
+有幾件重要的事情得先搞清楚：
+
+- **逐 chunk 的串流 gating 不在 `v0.1.x` 範圍內。**
+  `withSpendGuard(...)` 的 `getStreamedResponse(...)` 是**直接 pass-through、沒有
+  PRE/POST gating** — 串流會原封不動地轉發出去。等 substrate 的 `LLM_STREAM_DELTA`
+  trigger 出貨後，POST_D08 / `v0.2` 才會加上逐 chunk 的 gating。目前每一個串流呼叫都會
+  繞過 reserve / commit 這個 bracket；如果你的長時間串流需要 mid-stream 強制執行，
+  那就改用 non-streaming 的 Agent.run() 一輪一輪跑。
+- **DEGRADE patch 套用會以 `MutationApplyFailed` 的形式冒出來。**
+  DEGRADE-mutation-apply 這條路徑在 v0.1.x 是反範圍的（design.md §3 non-goals）。
+  substrate 的 DEGRADE outcome 會以 CONTINUE 的形式流過去 — bracket 不會去改寫 inner
+  request。內建的 claim mutation 會在後面的 slice 才登場。這跟 Python `openai_agents.py`
+  裡 `SpendGuardAgentsModel` v0.5.1 的立場一致。
+- **對 substrate 拓寬 `UnitRef` 有相依關係。** 照 design.md §4 的 superset，v0.1.0 的
+  options 介面省略了 `windowInstanceId`、`unit`、`pricing` 和 `claimEstimator`。
+  TS substrate 的 public `UnitRef` 目前還沒把 `unit_id` 暴露出來
+  （`sdk/typescript/src/client.ts::mapUnitRef` 寫死成空的）；未來某個 hardening slice 會把
+  SDK 端的拓寬跟 adapter 的接線一起處理掉。
+- **串流回應上沒有 mid-stream 的上限。** SpendGuard 在 pre-call 時就預留好預測的 budget，
+  commit 則發生在呼叫結束時、對著真實的 `usage.totalTokens` 做。adapter 永遠不會為了
+  攔住 token 繼續吐出而去拆掉一條飛行中的串流 — 超量會落到稽核鏈裡、在 commit 時反映出來，
+  但那些 token 早就已經吐出去了。
+- **`raiseError` 語義：SpendGuard substrate 的 error 會原樣往上傳。**
+  `client.reserve(...)` 拋出的 `DecisionDenied` / `DecisionStopped` /
+  `ApprovalRequired` 不會被攔下來 — 它們會穿過 `Runner.run(...)` 一路傳到 caller。
+  在 reserve 這條路徑上，bracket 同樣不會吞掉 `SidecarUnavailable`（未來的
+  `degrade=auto` 模式在 v0.1.x 是被鎖死的 — design.md §3 non-goals）；要不要因為 sidecar
+  掛掉就讓整個 run 停下來，由 Runner 的 caller 自己決定。
+- **不支援 browser**（D05 §6 UDS-only）。adapter 只跑在有 `AsyncLocalStorage` 的
+  Node 20.10+ 上。
+
+## Demo
+
+內附的 docker-compose demo 會拿一個真的 `@openai/agents` `Agent` + `Runner.run` +
+sidecar + counting-stub provider，端到端證明完整的 ALLOW + DENY + STREAM 矩陣：
+
+```bash
+make demo-up DEMO_MODE=openai_agents_ts
+```
+
+這個模式會把 `postgres + sidecar + openai-agents-runner + counting-stub` 開起來，
+然後從
+[`examples/openai-agents-ts-composite/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/openai-agents-ts-composite/)
+這個 Node 範例跑三次呼叫：
+
+- **ALLOW** — 一則在 budget 內的小訊息。`withSpendGuard` 的 `getResponse(request)`
+  發出 PRE，`client.reserve()` 回 ALLOW，包好的 Model 的 HTTP 呼叫發出去，counter `+1`，
+  bracket 帶著真實的 token 用量送出一個 `SUCCESS` commit。
+- **DENY** — `Agent.modelSettings.extraBody.spendguard_estimate_override =
+  "2000000000"` 直接衝破預先種入的 1B 硬上限。sidecar 的 contract evaluator 送出
+  `SPENDGUARD_DENY`，bracket 拋出 `DecisionDenied`，`Runner.run(...)` 在上游 HTTP 呼叫
+  **之前**就停住。counting-stub 的 counter 不變（證明 gate 是在 pre-call 觸發的）。
+- **STREAM** — 一個 pass-through 的串流呼叫，後面再接一次 non-streaming 的
+  `Runner.run(...)`，確認 bracket 的紀律有撐住。counter `+1`。
+
+跑乾淨時的成功行（已鎖定 — CI 會 grep 這個一字不差的拼法）：
+
+```
+[demo] openai_agents_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+完整細節與 verify-SQL gates 都在
+[`deploy/demo/openai_agents_ts/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/openai_agents_ts/README.md)。
+
+獨立的 `--mock` 模式（不需要 sidecar）會拿同一個 factory，搭配一個 in-process 的
+`SpendGuardClient` double 來跑：
+
+```bash
+cd examples/openai-agents-ts-composite
+pnpm install
+node demo.mjs --mock
+```
+
+mock 模式會明確驗證「DENY ⇒ inner Model 絕對不會被呼叫」這條不變式（review-standards
+§1.6 reviewer gate 1.6），一旦違反就以非零 exit code 退出。
+
+## 疑難排解
+
+常見的開機期與第一次呼叫的錯誤。substrate 的 typed exceptions 有從
+`@spendguard/openai-agents` 重新匯出，所以你可以直接對 `DecisionDenied` /
+`SidecarUnavailable` 做 pattern-match，不用再多 import 一次。
+
+- **`DecisionDenied: reserve() denied by contract`** — 這是 budget 用完、或某條 contract
+  rule 送出 `SPENDGUARD_DENY` 時的預期行為。bracket 會重新拋出，`Runner.run(...)` 停住，
+  上游的 OpenAI HTTP 呼叫永遠不會發出。去翻 sidecar log 看是哪條 rule 命中；ledger 裡那筆
+  decision row 會帶著 `decision_context.contract_rule`。
+
+- **Budget gate 沒擋住 — OpenAI 呼叫還是照樣發出去了。** 幾乎都是因為
+  `withSpendGuard(...)` 沒有真的接進 `Agent({ model })` 那個 slot。檢查你傳給
+  `new Agent(...)` 的 model — 它**一定**要是包好的那個，不能是原始的
+  `OpenAIChatCompletionsModel(...)` reference。
+
+- **`@spendguard/openai-agents called outside an active runContext().`** —
+  每一個透過 `withSpendGuard(...)` 驅動的 `Runner.run(...)` 都**一定**要包在
+  `await runContext({ runId }, () => Runner.run(agent, input))` 裡。錯誤訊息本身就附了
+  你該套上去的那段確切 wrap snippet。
+
+- **`SidecarUnavailable: handshake timeout`** — sidecar 的 UDS 路徑
+  （`SPENDGUARD_SIDECAR_UDS`，預設 `/var/run/spendguard/adapter.sock`）連不上。
+  確認 sidecar container 有起來、socket 檔案存在，而且你的 Node process 對它有讀寫權限。
+  在 demo overlay 裡這是靠 `deploy/demo/openai_agents_ts/docker-compose.yaml` 接好的；
+  到 demo 之外，把同一個 socket 路徑 mount 進你 Node container 的
+  `/var/run/spendguard/`。
+
+- **`RunContext` import 跟 `@openai/agents` 的 `RunContext` 撞名** — import 時把其中一個
+  alias 掉：
+
+  ```ts
+  import type { RunContext as SpendGuardRunContext } from "@spendguard/openai-agents";
+  import { RunContext } from "@openai/agents";
+  ```
+
+- **commit 上的 token 數跟 provider 回報的對不起來。** bracket 的
+  `extractUsage(response)` 同時接受 `Usage`-class 的 camelCase
+  （`{inputTokens, outputTokens, totalTokens}`）跟 snake_case
+  （`{prompt_tokens, completion_tokens, total_tokens}`）兩種形狀 — Agents SDK 對 OpenAI
+  provider 出的是 Usage class，但是把原始 OpenAI HTTP 形狀原封不動傳過來的 custom provider
+  也照樣支援。如果兩種形狀都沒有（罕見；防禦性的 fallback），commit 會把缺的欄位以 `0`
+  送出 — 用 `response.providerData` 去檢查 provider 的原始回應。
+
+- **Class identity 檢查失敗：`err instanceof DecisionDenied` 是 false** — 你直接從
+  `@spendguard/sdk` 匯入 `DecisionDenied`，但包好的 model 的 bracket 是從
+  `@spendguard/openai-agents` 拋出來的。Class identity 其實是有保留的（是 re-export，
+  不是 subclass），所以不管你用哪一個 import，這個檢查都會成立。如果還是失敗，那就懷疑
+  你的 `node_modules` 樹裡有重複的 `@spendguard/sdk`。
+
+## 相關文件
+
+- [Quickstart](../../quickstart/) — 5 分鐘把整套 SpendGuard stack 拉起來。
+- [Vercel AI SDK (covers Mastra)](../vercel-ai/) — 這個 adapter 的 Vercel AI
+  中介軟體兄弟版。
+- [LangChain.js callback handler](../langchain-ts/) — LangChain.js 的
+  callback-handler 兄弟版。
+- [Pydantic-AI](../pydantic-ai/) — Python 兄弟版。
+- [Contract YAML reference](../../contracts/yaml/) — 撰寫 allow/stop rules。
+- 其他 adapter 整合：
+  [LangChain & LangGraph (Python)](../langchain/) ·
+  [OpenAI Agents SDK (Python)](../openai-agents/) ·
+  [Microsoft AGT](../agt/) ·
+  [LiteLLM proxy guardrail](../litellm-proxy/)

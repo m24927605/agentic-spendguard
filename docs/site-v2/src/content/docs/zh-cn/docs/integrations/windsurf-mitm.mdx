@@ -1,0 +1,196 @@
+---
+title: "Windsurf IDE MITM codec —— 实验性,仅限 SOW"
+description: >-
+  逆向得到的 gRPC-Web codec,让 SpendGuard 能在 Windsurf IDE
+  Cascade 会话上介入做预算预留。实验性质,仅对签了维护补充条款的
+  Enterprise SOW 客户开放。Codeium 一改 wire 协议 codec 就会失效,
+  客户自行承担失效窗口风险。切勿在 GA 配置中上线。
+sidebar:
+  badge:
+    text: Experimental
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="实验性 —— 仅限 SOW">
+  **切勿作为 GA 功能上线。** 这个集成只对签了维护补充条款的
+  Enterprise SOW 客户开放。Codeium 一改动 wire 协议,codec 就会失效。
+  客户在 SOW 框架下自行承担失效窗口风险。完整的法务立场见仓库里的
+  [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/SOW.md)。
+</Aside>
+
+> **法务立场。** 这个 codec 实现的是
+> **逆向得到的互操作能力(reverse-engineered interoperability)**。
+> [`PROTOCOL.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/PROTOCOL.md)
+> 里记录的 wire 格式,全部是从 Windsurf 二进制外部观测得到的,
+> 不包含任何 vendor 源码。启用该 codec 的 SpendGuard 客户,是在
+> Enterprise SOW 下操作,SOW 明确声明:(a) Codeium 一改 wire 协议
+> codec 就可能失效;(b) 客户自己负责确认其 Windsurf / Codeium
+> 服务条款是否允许在主机上对出站流量做 MITM。
+
+## 为什么 Windsurf IDE 需要自定义 adapter
+
+Windsurf IDE 的托管 Cascade 模式**不**调用 `api.openai.com`
+或 `api.anthropic.com`。它走的是 `server.codeium.com` 和
+`windsurf-server.codeium.com`,通过私有 gRPC-Web 承载 Codeium
+自家的 Cascade envelope。SpendGuard 的标准 adapter(model
+middleware、base-URL 替换、OpenAI 兼容的 egress 代理)都看不到这些
+消息——wire 字节是 Codeium 内部的 protobuf,不是 OpenAI JSON。
+
+那些在全员工范围内铺开 Windsurf、又想对 Cascade 会话做 SpendGuard
+预算 gating 的 SOW 客户,愿意拿 codec 失效风险换取完整的会话覆盖。
+
+## codec 做什么
+
+```
+Windsurf IDE ──TLS→ SpendGuard egress proxy (D02 leaf w/ server.codeium.com SAN)
+                       │
+                       ├─ if Host == server.codeium.com AND feature `windsurf-mitm-experimental`
+                       │                                AND env `SPENDGUARD_EXPERIMENTAL_CODECS=1`
+                       │     │
+                       │     ▼
+                       │  services/windsurf_codec
+                       │     ├─ framing::GrpcWebReader  → DecodedFrame
+                       │     ├─ version::is_known       → fail-closed on unknown stamp
+                       │     ├─ envelope::CascadeRequest::decode → CascadeRequest
+                       │     ├─ translate::to_openai → CanonicalRequest
+                       │     │    └→ ledger::reserve → reservation_id
+                       │     ├─ upstream HTTPS to server.codeium.com (byte-perfect tee)
+                       │     ├─ envelope::CascadeResponseDelta::decode (server-streaming)
+                       │     ├─ translate::to_openai_chunks → CanonicalResponseChunks
+                       │     │    └→ ledger::commit_estimated / release
+                       │     └─ passthrough: byte-for-byte (codec never mutates wire bytes)
+                       │
+                       └─ else: D02 default pass-through (no codec)
+```
+
+codec 挂在 workspace 的 feature flag `windsurf-mitm-experimental`
+下。默认构建不编译这个 codec crate;要用它,必须在 egress-proxy
+和 CLI 消费端显式开启该 feature,**并且**还要设置环境变量
+`SPENDGUARD_EXPERIMENTAL_CODECS=1`。
+
+## 四个醒目的"EXPERIMENTAL"标记
+
+按
+[`design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D18_windsurf_mitm/design.md)
+§3,codec 始终带着四个醒目标记。任何 diff 只要删掉其中任何一个,
+reviewer 直接打回。
+
+1. **Cargo manifest:**
+   [`services/windsurf_codec/Cargo.toml`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/Cargo.toml)
+   里带 `[package.metadata.experimental]`,`reason` 字符串一字不差是
+   `Reverse-engineered Windsurf / Codeium Cascade wire
+   protocol. Breaks on vendor release.`
+2. **Stderr banner:** 每个 codec 公开入口都会调用
+   `assert_experimental_banner_emitted()`,进程内首次使用时往 stderr
+   打印:
+   ```
+   [EXPERIMENTAL] windsurf-mitm codec active. Vendor protocol:
+   undocumented. Support tier: SOW only. SOW:
+   services/windsurf_codec/SOW.md. DO NOT SHIP IN GA CONFIG.
+   ```
+3. **双通道 opt-in:** 必须同时满足
+   `SPENDGUARD_EXPERIMENTAL_CODECS=1`(环境变量)**和**
+   `[experimental.windsurf_codec] enabled = true`
+   (`spendguard.toml`)。只开一个不算数。
+4. **SOW 补充条款文档:**
+   [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/SOW.md)
+   在显著位置带 `Status: EXPERIMENTAL — SOW only`,front-matter 里有
+   `noindex: true`,顶部还有一条原文照搬的警告 callout
+   `DO NOT SHIP AS A GA FEATURE`。
+
+## 失效窗口 SLA
+
+SOW 补充条款里填的是:
+
+| 字段 | 客户侧取值 |
+|-------|---------------------|
+| codec 失效检测窗口 | 通常在 Codeium 发版后 ≤24 小时 |
+| codec 修复周转目标 | 通常 ≤5 个工作日 |
+| 客户升级联系人 | on-call 频道 |
+| SpendGuard 升级联系人 | SpendGuard customer-success on-call |
+| 测试过的 Windsurf 客户端版本范围 | 交付时的 Windsurf IDE 最低/最高版本 |
+| 测试过的 Cascade wire 版本范围 | 默认:`cascade.v2.0`、`cascade.v2.1` |
+
+codec 一旦失效,SpendGuard 会(按客户主机侧的抓包流程)重新捕获最新
+的 Cascade wire 字节,刷新 proto 描述和 fixture 语料库,再发布一个带
+feature-flag 的构建。客户在自己的变更管理窗口内重新部署。
+
+## Sealed-secret 凭据模型
+
+客户的 Windsurf / Codeium 会话 bearer token 对 codec 端到端不透明。
+它们从 Windsurf IDE 二进制原样流向 `server.codeium.com`;codec **不**
+解密、不记录、也不持久化它们。审计链路按 POST_GA_03 的租户脱敏策略,
+把 `model_name` / `max_tokens` 之外的消息体字段全部脱敏。
+
+codec 的测试套件会拦截以下任何凭据前缀泄漏进已提交的 fixture
+payload:
+
+- `sk-codeium-`
+- `wsf_`
+- `codeium_pat_`
+- `cdm_`
+
+codec 不引入任何新的长期密钥。一旦为该 SOW 部署扩展了 leaf 证书的
+SAN,D02 信任库就覆盖了 `server.codeium.com`。
+
+## 运维方威胁模型
+
+codec 是**尽力而为的 gating(best-effort gating)**,不是硬性策略闸门。
+当 codec 看不懂 wire 形态(因为 Codeium 改了它),egress 代理
+**会发出 `decoder_skipped` 并让这次调用直接放行**。这跟 codec
+对未知 Cascade model 字符串的处理立场一致。失败会大声暴露(decode-error
+指标 + stderr banner + 结构化日志),但**不会**阻断客户的 Cascade
+会话。
+
+而当 wire 版本戳不在 registry 里(未知的 Cascade 发版)时,codec 在
+decode 边界上 fail **closed**,返回 `windsurf_wire_version_unsupported`
+——请求**不会**转发;IDE 看到的是合成的 503。
+
+完整的威胁模型表在
+[`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/SOW.md)
+§4。
+
+## 演示
+
+一个基于 fixture 的演示,用六个合成的 `.windsurf-rpc` fixture
+(simple / tool calls / long streaming / error response / unknown
+wire version / truncated body)端到端验证 codec 的正确性。该演示
+**不**启动 Windsurf IDE 二进制,也**不**触碰 `server.codeium.com`:
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=windsurf_mitm_fixture
+```
+
+演示的
+[`README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/windsurf_mitm_fixture/README.md)
+记录了这条分层流水线(framing decode → 版本闸门 → envelope decode
+→ 翻译 → mock sidecar reserve+commit → 逐字节保真 → counting-stub
+POST),以及它跟一个假想的"启动 Windsurf 二进制"演示的差异。
+
+客户的部署会用自己验证过的抓包路径,拿同一个 codec 去跑真实的
+Cascade 流量。这个演示是在隔离环境里证明 codec 的正确性。
+
+## 限制
+
+- **真实 Windsurf 流量不进 CI。** 只用录制好的 fixture。真实抓包
+  证据放在 SOW 客户侧的工件里。
+- **不覆盖 Windsurf 的非 Cascade 界面。** Tab 自动补全和 inline
+  diff 不在范围内;只 gating 托管的 Cascade 界面。
+- **不覆盖 Codeium 独立客户端。** 只覆盖 Windsurf IDE Cascade。
+  裸 Codeium API 客户端走的是另一种上游模式。
+- **消息体解码失败时是尽力而为的 gating。** 已知 wire 版本上出现未知的
+  消息体形态,会发出 `decoder_skipped` 并放行;codec 会大声声明这件
+  事,但不会阻断客户的 Cascade 会话。
+- **wire 版本漂移时是 fail-closed gating。** 未知 wire 版本(registry
+  之外)返回 503,带 `windsurf_wire_version_unsupported`——这跟消息体
+  解码失败的路径不一样。
+- **Cursor codec 是独立的 D17**——不在 D18 范围内。
+
+## 相关阅读
+
+- [快速开始](../../quickstart/) —— 5 分钟拉起完整的 SpendGuard 栈
+- [Contract YAML 参考](../../contracts/yaml/) —— 编写 allow/stop 规则
+- Cursor IDE MITM codec(独立的 D17):[Cursor MITM](../cursor-mitm/)
+- 其他 adapter 集成:[Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [Kong AI Gateway](../kong-ai-gateway/) · [Dify](../dify/) · [LiteLLM SDK shim](../litellm-sdk-shim/)

@@ -1,0 +1,198 @@
+---
+title: "Dify Model Provider Plugin — spendguard"
+description: >-
+  把 Agentic SpendGuard 装成 Dify Model Provider Plugin。在自托管 Dify 和
+  Dify Cloud 上,为每一次 chat-message、agent 步骤和 workflow 节点提供逐次调用的
+  预算预留 + 签名审计链。先经过一次 fail-closed 的 sidecar 决策,再转发给
+  OpenAI 或 Anthropic 上游。
+---
+
+
+> Dify v1.0+ 带了 **Model Provider Plugin SDK** —— 一个 Python plugin
+> daemon,Dify core 会把 LLM 调用分发给它。SpendGuard 以 `spendguard`
+> 的身份接进来:管理员在 Dify 的 provider 下拉框里选它即可。每一次
+> `chat-message`、`agent` 步骤和 `workflow` LLM 节点,在流量真正到达
+> 运维选定的真实 provider 之前,都会先走完 SpendGuard 的 reserve →
+> upstream → commit 生命周期。
+
+## 为什么要做 Dify 插件
+
+Dify 是体量最大的无代码 LLM 应用 SaaS 替代品。跑在 OpenAI / Anthropic /
+Bedrock 上的自托管 Dify 部署,**根本没有预算原语**(只有一个做按 workspace
+限流的 `quota`),也**没有签名审计链**。Dify 的 plugin daemon 是每一次 LLM
+调用都必经的唯一漏斗,所以它是 SpendGuard 做调用前拦截最干净的 MITM 切入点。
+
+- **`_invoke`** —— 非流式的 reserve → upstream → commit
+- **`_stream_generate`** —— SSE 代理,流结束时按真实用量 commit
+- **`get_num_tokens`** —— 配置好之后走 sidecar 的 `/v1/tokenize`
+  HTTP companion;否则回退到 chars/4
+
+按 Dify v1 的契约,插件跑在自己独立的容器里;镜像基底兼容
+`langgenius/dify-plugin-daemon:0.8`,再叠加 SpendGuard SDK 和各上游 provider 的 SDK。
+
+## 安装
+
+### Dify Cloud
+
+```bash
+dify plugin install m24927605/spendguard:1.0.0
+```
+
+marketplace 上架的包带着官方构建签名;Dify Cloud 会先校验经 cosign 签名的
+`.difypkg`,再激活插件。
+
+### 自托管 Dify
+
+下载发布好的 bundle,用 Dify CLI 侧载进去:
+
+```bash
+gh release download dify-plugin-v1.0.0 \
+  --repo m24927605/agentic-spendguard \
+  --pattern "spendguard-*.difypkg"
+
+dify plugin install ./spendguard-*.difypkg
+```
+
+对于气隙(air-gapped)的自托管部署,把插件直接打包进 Dify 的 plugin-daemon 镜像里:
+
+```dockerfile
+FROM langgenius/dify-plugin-daemon:0.8
+COPY spendguard-1.0.0.difypkg /opt/dify/plugins/
+RUN dify plugin install /opt/dify/plugins/spendguard-1.0.0.difypkg
+```
+
+之后在你的 Dify provider UI 里,从 Model Provider 下拉框选
+**SpendGuard (Budget-Gated Forwarder)**。
+
+## 配置
+
+每次安装,插件读两份状态:
+
+1. **Plugin daemon 环境变量** —— 由平台运维在 `dify-plugin-daemon`
+   容器上设置。启动时读一次。
+2. **Provider 凭据** —— 通过 Dify 的 provider 表单按 workspace 录入。
+   每次 `_invoke` 调用都会读。
+
+### Plugin daemon 环境
+
+| Env | 是否必填 | 默认值 | 用途 |
+|-----|----------|---------|---------|
+| `SPENDGUARD_SIDECAR_UDS` | YES | — | SpendGuard sidecar UDS 的路径(`/run/spendguard/adapter.sock`)。 |
+| `SPENDGUARD_TENANT_ID` | YES | — | 握手时声明的 tenant UUID。 |
+| `SPENDGUARD_SIDECAR_HTTP_URL` | NO | — | 设了之后,`get_num_tokens` 走 sidecar HTTP companion 的 `/v1/tokenize`。没设或连不上时回退到 chars/4。 |
+| `SPENDGUARD_DIFY_FAIL_OPEN` | NO | `0` | 仅限开发用。设为 `1` 时,sidecar 出错会降级放行(degrade-to-allow)并打一条 WARN 日志。 |
+
+### Provider 凭据(按 Dify workspace)
+
+Dify 的 provider 表单暴露这些字段:
+
+| 字段 | 是否必填 | 说明 |
+|-------|----------|-------|
+| **Upstream Provider** | YES | `openai` 或 `anthropic`(v1 两个都带)。`gemini` / `bedrock` 留给 v1.1,目前会抛 `InvokeError`。 |
+| **OpenAI API Key** | provider = openai 时 | 明文 `sk-...` |
+| **Anthropic API Key** | provider = anthropic 时 | 明文 `sk-ant-...` |
+| **Upstream Base URL** | NO | 覆盖上游 API 根地址(LiteLLM proxy、Azure OpenAI 等) |
+| **SpendGuard Tenant ID** | YES | 必须和 daemon 上的 `SPENDGUARD_TENANT_ID` 一致。 |
+| **SpendGuard Budget ID** | YES | 该 workspace 扣账针对的 budget。 |
+| **SpendGuard Window Instance ID** | YES | budget 滚动所在的时间窗。 |
+
+## 生命周期
+
+```
+Dify core (chat-messages / agent step / workflow LLM node)
+   ↓ RPC bus
+dify-plugin-daemon
+   ↓ SpendGuardLLM._invoke()
+   1. Build DifyCallContext from credentials + prompt_messages
+   2. _DifyReservation.reserve  ── UDS+mTLS ──▶ SpendGuard sidecar
+                                                   ALLOW | DENY | DEGRADE
+   3. ALLOW → upstream forward (OpenAI / Anthropic)
+   4. SUCCESS → emit_llm_call_post(SUCCESS, real usage)
+   5. FAILURE → emit_llm_call_post(FAILURE)
+```
+
+- **DENY** 映射成 `InvokeAuthorizationError`(Dify HTTP 403)。
+- **DEGRADE** 映射成 `InvokeServerUnavailableError`(Dify HTTP 503),
+  除非 daemon 上设了 `SPENDGUARD_DIFY_FAIL_OPEN=1`。
+- **真实用量**从上游的 `response.usage` 读取,喂给 `commit_success`,
+  这样审计行携带的是 `actual_input_tokens` / `actual_output_tokens` ——
+  绝不用估算器的快照(INV-5)。
+
+## 流式
+
+`_stream_generate` 逐块代理 SSE,在流结束时用累计的真实用量 commit。对
+OpenAI,插件无条件设 `stream_options.include_usage=true`,好让最后一块带上
+`prompt_tokens` 和 `completion_tokens`(不然 commit 落地时用量就是零 token)。
+对 Anthropic,插件从 `message_start` 累计 `input_tokens`,从 `message_delta`
+累计 `output_tokens`。
+
+当上游整个把用量块漏掉时(罕见;某些兼容层会这样),commit 会对累计的内容
+回退到 `chars/4` 估算器,并打一条 WARN。`reserve` 时记下的预留金额是下限;
+即便估算器少算了,预算依然安全。
+
+Dify 调用方在流中途取消,会被归类为 `CANCELLED`,走 `release_failure` 而不是
+`commit_success` —— 预留被干净地释放,审计行也反映出这次取消。
+
+## 限制
+
+- **超出 model 节点的 workflow 步骤拦截不在 v1 范围内。**
+  RAG 检索、workflow 边上的 tool-call 成本、以及按 prompt 的
+  dataset-search 预算,都是未来才支持的 slot 类型。
+- **不替代 Dify 原生的 quota。** SpendGuard 拦的是美元花费;Dify 的 quota
+  拦的是按 workspace 的请求速率。运维通常两者都开,各自管一个维度,互不相交。
+- **Bedrock 和 Gemini 上游留给 v1.1。** provider 下拉框列着它们,但插件在
+  `_invoke` 时会抛 `InvokeError("upstream provider not supported in this plugin version")`。
+- **按 app 的 budget key。** v1 的 resolver 读取 Dify 传过来的 workspace + app
+  ID。按 prompt 类别或按用户的细粒度 budget key 需要自定义 resolver(不在 v1
+  范围内)。
+
+## Demo
+
+随包带的 docker-compose demo,对着真实的 SpendGuard sidecar 端到端跑通完整的
+ALLOW + DENY + STREAM 矩阵:
+
+```bash
+make demo-up DEMO_MODE=dify_plugin_real
+```
+
+这个模式会启动 `postgres + sidecar + ledger + canonical-ingest +
+counting-stub + dify-plugin-runner`,然后直接经
+`SpendGuardLLM._invoke()` 驱动三次调用(绕开完整的 Dify Workspace
+chat-message HTTP 层,让 demo 聚焦在插件边界上):
+
+- **ALLOW** —— 预算内的小请求体 → SpendGuard reserve →
+  counting-stub 应答 → 按真实用量 commit。
+- **DENY** —— 把调用指向一个不存在的 budget → sidecar DENY →
+  counting-stub 计数器保持 UNCHANGED(证明 gate 在上游调用之前就触发)。
+- **STREAM** —— 预算内的 `stream=True` 请求体 → SSE 块经插件 yield 出来 →
+  流结束时用累计用量 commit。
+
+[`deploy/demo/verify_step_dify_plugin_real.sql`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/verify_step_dify_plugin_real.sql)
+里的校验 SQL 把关:
+
+- `ledger_transactions.reserve >= 2`(ALLOW + STREAM)
+- `ledger_transactions.commit_estimated >= 2`
+- `ledger_transactions.denied_decision >= 1`(那一步 DENY)
+- INV-2 严格顺序:最早的 reserve 早于最早的 outcome。
+
+## 排错
+
+- **`SPENDGUARD_SIDECAR_UDS is missing`** —— 在 plugin daemon 容器上设这个
+  环境变量。插件没有它会拒绝启动,而不是在第一次调用时悄无声息地失败。
+- **`InvokeAuthorizationError: SpendGuard denied the call`** —— sidecar 触发了
+  DENY。异常里带着 `decision_id`,运维可以据此在审计链里追溯这次判定。
+- **`InvokeServerUnavailableError: SpendGuard sidecar unavailable`** ——
+  sidecar 握手失败(UDS 缺失、mTLS bundle 过期)。查
+  `kubectl logs -l app.kubernetes.io/name=spendguard-sidecar`。
+- **`upstream provider 'gemini' not supported in this plugin version`** ——
+  v1 只带 OpenAI + Anthropic。表单列出 Gemini / Bedrock 是为了前向兼容;
+  眼下先选一个支持的 provider。
+- **`get_num_tokens` 返回 chars/4** —— 要么 daemon 上没设
+  `SPENDGUARD_SIDECAR_HTTP_URL`,要么那个 URL 上的 companion 连不上。这个回退
+  不致命;想要 token 级精确的成本预测时,把 URL 配上即可。
+
+## 相关
+
+- [Quickstart](../../quickstart/) —— 5 分钟拉起完整的 SpendGuard 栈
+- [Contract YAML reference](../../contracts/yaml/) —— 编写 allow/stop 规则
+- 其他适配器集成:[Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [OpenAI Agents SDK](../openai-agents/) · [Kong AI Gateway](../kong-ai-gateway/) · [LiteLLM proxy](../litellm-proxy/)

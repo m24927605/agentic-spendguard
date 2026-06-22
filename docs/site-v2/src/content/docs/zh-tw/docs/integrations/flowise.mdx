@@ -1,0 +1,140 @@
+---
+title: "Flowise 自訂節點 — @spendguard/flowise-nodes"
+description: >-
+  把 Agentic SpendGuard 當成 Flowise 自訂節點裝起來。SpendGuard
+  ChatModel Wrapper 可以拖到任何 canvas 上,包住任何
+  BaseChatModel,並掛上 D04 的 SpendGuardCallbackHandler,讓每一次
+  chat 呼叫都在上游 HTTP 發出去之前,先向 SpendGuard sidecar 預留花費。
+  預設 fail-closed;每次呼叫預設保守認領 $1 USD-micros。
+---
+
+> [Flowise](https://flowiseai.com/) 是目前最大的開源 no-code
+> 視覺化 agent builder(GitHub 約 40k stars,Apache-2.0)。每個 canvas
+> 節點都是一個實作 `INode` contract 的 TypeScript class;chat-model
+> 節點則把上游 HTTP 藏在一個可拖曳的 anchor 後面。SpendGuard 以
+> `@spendguard/flowise-nodes` 形式出貨 — 用 `npm` 裝好、重啟
+> Flowise,wrapper 就會出現在 **Spend Guard → SpendGuard
+> ChatModel Wrapper** 底下。把它拖到任一 ChatModel 跟你下游的
+> Chain / Agent 之間,每一次呼叫都會在上游 model HTTP 發出去之前,
+> 先向 SpendGuard sidecar 預留花費。
+
+## 為什麼 Flowise 要用 SpendGuard
+
+Flowise 那種 per-node 的 ChatModel 設定,是整個 no-code 視覺化
+builder 生態系裡最乾淨的擴充點 — 但今天一個 chatflow 去打 OpenAI /
+Anthropic / Bedrock,根本沒有 pre-call 的金額 gate、沒有 reservation、
+也沒有任何簽章過的稽核紀錄。SpendGuard wrapper 拖進去之後就能:
+
+- 在 canvas 把上游 HTTP 派出去**之前**,先拿預估花費去 operator
+  設定好的 budget 做 reservation。DENY 會直接跳過上游 — prediction
+  會冒出一個 SpendGuard error,供應商那邊一個 token 都不會收費。
+- 從 LangChain.js callback handler 的 end-of-call hook 把真正的
+  `inputTokens + outputTokens` commit 回去(wrapper 原封不動沿用 D04 的
+  `SpendGuardCallbackHandler`)。
+- canvas 上只多一個節點 — 開發者不用寫 TypeScript、不用 fork Flowise
+  原始碼,也不會弄丟任何其他 Flowise 功能。
+
+## 安裝
+
+### 路徑 1 — npm 直接裝進 Flowise 原始碼
+
+```bash
+cd /path/to/Flowise
+pnpm add @spendguard/flowise-nodes
+pnpm restart
+```
+
+裝完之後,wrapper 會出現在 canvas 側邊欄的 **Spend Guard → SpendGuard
+ChatModel Wrapper** 底下。
+
+### 路徑 2 — 直接塞進官方 Docker image
+
+```bash
+npm pack @spendguard/flowise-nodes
+mkdir -p ~/.flowise/nodes/spendguard
+tar -xzf spendguard-flowise-nodes-0.1.0.tgz \
+    -C ~/.flowise/nodes/spendguard --strip-components=1
+docker restart flowise
+```
+
+### 路徑 3 — 自訂 Dockerfile 層
+
+```dockerfile
+FROM flowiseai/flowise:2
+USER root
+RUN npm install -g @spendguard/flowise-nodes && \
+    cp -r /usr/local/lib/node_modules/@spendguard/flowise-nodes/dist \
+          /root/.flowise/nodes/spendguard
+USER node
+```
+
+## 在 canvas 上設定
+
+| 輸入                        | 必填     | 說明                                                                                  |
+| --------------------------- | -------- | -------------------------------------------------------------------------------------- |
+| `chatModel`                 | 必填 | 任一個 Flowise `BaseChatModel`(ChatOpenAI、ChatAnthropic、ChatBedrock、ChatGoogleVertexAI…)。 |
+| `tenantId`                  | 必填 | SpendGuard tenant UUID。                                                                |
+| `budgetId`                  | 必填 | 要扣款的 SpendGuard budget UUID。                                                      |
+| `windowInstanceId`          | 必填 | 目前 active 的 SpendGuard budget-window instance UUID。                                |
+| `unit`                      | 預設  | 預設是 `usd_micros`;可依供應商單位覆寫。                                  |
+| `sidecarUds`                | 選填 | 沒給就回退到環境變數 `SPENDGUARD_SIDECAR_UDS`。                                            |
+| `route`                     | 選填 | 預設 `llm.call`;per-route 的 SpendGuard 政策掛在這裡。                     |
+| `claimEstimatorJson`        | 選填 | JSON `{"amountAtomic":"...","scopeId":"..."}`。留空 → 每次呼叫保守認領預設 $1 USD-micros。 |
+
+## 行為矩陣
+
+| 路徑                       | 會發生什麼                                                                                                                       |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Sidecar **ALLOW**          | Wrapper 把 handler 接上去;被包住的 model 把上游派出去;commit 回傳真正的 `inputTokens + outputTokens`。                |
+| Sidecar **DENY**           | D04 handler 在 `handleChatModelStart` 裡直接 throw。**完全沒有上游 HTTP。** Flowise 會把這個 error 帶進 prediction response。 |
+| Sidecar **DEGRADE**        | 預設 fail-closed — handler 直接 throw。                                                                                              |
+| `claimEstimatorJson` 留空 | 每次呼叫保守認領預設 `$1` USD-micros(對 no-code builder 來說開箱即用)。                                                  |
+| `claimEstimatorJson` 有設定   | 用 JSON 覆寫去決定 reservation 金額;per-route 的調校就在這裡做。                                                        |
+
+## 跟 egress proxy 怎麼選
+
+你也可以走網路層,用 SpendGuard egress proxy 來 gate Flowise 的花費
+(把 Flowise process 的 `OPENAI_BASE_URL` 指到 SpendGuard endpoint)。
+兩條路徑最後都會接到同一條稽核鏈;看你的拓樸來挑:
+
+| 情境                                                                                                  | 選哪條                              |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------- |
+| 你自己掌控 Flowise canvas + 想在側邊欄有個視覺化入口 + 要 per-node 的 budget 控制。            | `@spendguard/flowise-nodes`        |
+| Flowise 只是眾多打同一個供應商 URL 的工具之一 — 你想一份設定就全部蓋掉。 | Egress proxy `OPENAI_BASE_URL`     |
+| 你需要 canvas-node 等級的 metadata 進到稽核鏈裡(`canvas_node_id`、`flow_id`)。                  | `@spendguard/flowise-nodes`        |
+| 你動不了 Flowise 安裝(代管部署、不准裝 SDK)。                     | Egress proxy                       |
+
+## 限制
+
+- **只 gate ChatModel anchor。** Embeddings、vector store、tool 節點跟
+  RAG sources 要靠 SpendGuard egress proxy 來 gate(看
+  [drop-in 指南](/docs/drop-in/))。
+- **只有 per-node budget。** 跨節點的 budget 不變式是 contract 層該管的事
+  (D04 / D05) — 串接整張 canvas 的 budget 請用 contract DSL,不要靠
+  wrapper。
+- **只支援自架 Flowise。** Flowise Cloud 不准塞自訂節點;wrapper 只能
+  sideload。
+- **沒有 mid-stream cap。** 只在 end-of-stream 才 commit;不過 sidecar
+  在 pre-call 還是會 cap。
+- **只吃 `flowise-components` 2.x。** 透過 `peerDependencies` 釘在
+  `>=2.0.0`。1.x 的 INode contract 不一樣,wrapper 不會載入。
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=flowise_real
+```
+
+這會把 SpendGuard 基礎 stack(postgres / ledger / sidecar /
+canonical-ingest / outbox-forwarder)拉起來,外加一個 in-network 的
+counting stub 跟一個 Node 20 runner,用一個 3 步驟的 matrix(ALLOW +
+DENY + STREAM)去跑 wrapper 的 reserve / commit / release lifecycle。
+這個 matrix 會在 SpendGuard ledger 層驗證 INV-1(DENY 跳過上游)跟
+INV-5(真實用量會 commit)。
+
+## 原始碼
+
+- Wrapper 套件:`integrations/flowise/`
+- Demo overlay:`deploy/demo/flowise_real/`
+- 範例 chatflow:`examples/flowise/`
+- Spec:`docs/specs/coverage/D35_flowise/`

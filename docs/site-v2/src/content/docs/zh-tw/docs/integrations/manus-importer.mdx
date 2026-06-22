@@ -1,0 +1,247 @@
+---
+title: "Manus 計費匯入器(Butterfly Effect — 僅供對帳)"
+description: >-
+  針對 Manus admin REST credit 用量做事後匯入。SpendGuard 沒辦法
+  對 Manus 的花費做控管 — Manus 每個 agent task 都跑在
+  供應商自己管的 VM 裡。這個匯入器把累計的 credit 消耗拉回來,透過
+  vendored TOML 價目表換算成估算的美金,再送出帶
+  reservation_source=subscription_meter /
+  import_source=manus_team_api 標記的簽章稽核事件。
+sidebar:
+  badge:
+    text: 僅供對帳
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="SpendGuard 沒辦法控管 Manus 的花費 — 只有 Manus 自己可以">
+  Manus(Butterfly Effect,2026 年被 Meta 收購)每個 agent task
+  都跑在供應商自己管的 VM 裡。客戶的網路從頭到尾都不會帶到
+  per-LLM-call 的 payload;egress proxy 跟 SDK adapter 什麼都攔不到。
+  所以 Manus 匯入器**只能拿來對帳** — 它把事後的 credit 用量拉回來,
+  讓 dashboard 上給 CIO/CFO 看的 single-pane-of-glass 視角不至於開天窗,
+  但它**不會**對 Manus session 做 gate、做 throttle、或是中途
+  short-circuit。那塊責任是在 Manus 那邊。
+  架構上的理由可以看
+  [framework-coverage strategy memo Archetype IV](https://github.com/m24927605/agentic-spendguard/blob/main/docs/strategy/framework-coverage-2026-06.md)。
+</Aside>
+
+## 這東西是什麼
+
+`spendguard-importer-manus` 這個 crate(D15)是一支 Rust binary 加
+library,它會:
+
+1. 從 Manus admin REST API(`/v1/usage`)把累計的 credit 用量拉回來
+   — 這段被 feature-gate 在 `live` 後面,所以預設 build 是不碰 HTTP 的。
+2. 透過放在 `services/importer_manus/assets/price_table.toml` 的
+   vendored TOML 價目表,把供應商的 **credit** 換算成估算的 USD
+   (整數 micro-USD,乘法做 saturating)。
+3. 送出帶 `reservation_source=subscription_meter`(跟 D14/D16
+   同一個 family 對齊)跟 `import_source=manus_team_api` 標記的簽章
+   `spendguard.audit.import.manus_credit` CloudEvents — 落在跟 D13
+   subscription-meter rows、以及兄弟 D14 Devin / D16 Genspark 匯入器
+   同一個 dashboard 介面上。
+
+預設的 merge gate 是**清洗過的 fixture replay** — 也就是 commit 進去的
+`tests/fixtures/manus_usage.json` 快照。Live mode 要 operator 自己
+opt-in 才會開。
+
+## Credit → $ 換算(三個 tier)
+
+| Tier               | `credit_cost_micro_usd` | 稽核 row 的樣子 |
+|--------------------|-------------------------|-----------------|
+| **team_plan**       | `20_526`(≈ $0.020526/credit) | $39/mo / 1900 credits,整數截斷。代表性換算:47 credits × 20_526 = 964_722 micro-USD。 |
+| **enterprise**      | `0`(需要 operator override) | 每份合約另議;在 override 落地之前,dashboard 上的花費顯示 NULL。 |
+| **enterprise_byok** | `0`(LOAD-BEARING) | BYOK tier 的客戶是直接付給 LLM 供應商。匯入器**絕對不可以**對他們重複計費。 |
+
+這個換算是 pure 的:`credits × credit_cost_micro_usd`,用整數
+micro-USD 算,溢位的話 saturate 在 `i64::MAX`。價目表的
+`pricing_version` 會在換算的當下蓋章到每一筆送出去的 row 上 — 之後
+回頭去改 rate file,**不會**回去改寫歷史稽核 row。
+
+### 為什麼 `enterprise_byok = 0` 是 load-bearing
+
+BYOK 客戶是自己帶 LLM 供應商的金鑰(Anthropic / OpenAI / 等等)、
+直接付 LLM 帳單。如果匯入器在 Manus 這邊*又*收他們一次,SpendGuard
+dashboard 就會把同一筆花費重複算。價目表裡的 BYOK row 之所以
+設成 load-bearing,就是這個原因 — **還沒重讀過 BYOK 合約之前,
+絕對不要把它往上調**。
+
+## 安裝
+
+### Fixture 模式(預設 merge gate)
+
+```bash
+cargo run -p spendguard-importer-manus --bin importer_manus -- \
+    --mode fixture \
+    --fixture services/importer_manus/tests/fixtures/manus_usage.json
+```
+
+這支 binary 會把每個**終態(terminal)** session 對應的一筆 CloudEvent
+印到 stdout(進行中的 session 預設會被濾掉 — 要看的話加
+`--include-in-progress`)。demo runner 腳本
+(`deploy/demo/import_manus_fixture_demo.sh`)會把 INSERT 路徑接到一個
+用完即丟的 demo postgres 上。
+
+### Live 模式(operator opt-in)
+
+```bash
+export MANUS_API_TOKEN=<Team+ admin API token>
+export MANUS_API_BASE_URL=https://api.manus.ai   # optional override
+
+cargo run -p spendguard-importer-manus --features live --bin importer_manus -- \
+    --mode live
+```
+
+`live` feature 只會拉進帶 `rustls-tls` 的 `reqwest`(沒有
+`native-tls`、也沒有 `openssl-sys`),用 30s 的 per-request timeout,
+並且為了扛 rate-limit 做了有上限的指數退避(cap 是 1 小時)。Cursor
+分頁硬性卡在 10_000 頁,免得供應商給出一個有問題的 `next_cursor`
+讓它無限迴圈。
+
+把 token 的 scope 收斂到 **Manus Team+ admin API** 這個 scope 就好 —
+最小權限原則。
+
+## 冪等性(Idempotency)
+
+同一個時間窗口重跑不會重複送出。CloudEvent 的 `event.id` 是從
+`(workspace_id, session_id, window_end)` 推導出來的 deterministic
+UUIDv5;稽核 row 的 `dedupe_key` 是 `manus:<session_id>`(vendor 隔離
+的命名空間,所以跟 D14 / D16 的 key 永遠不會撞);canonical_ingest
+則是靠既有的 `event_replay_dedup` 表去 dedup。
+
+demo 你想重跑幾次都可以:
+
+```bash
+make -C deploy/demo demo-import-manus-fixture
+make -C deploy/demo demo-import-manus-fixture   # idempotent; 0 new rows
+```
+
+## CloudEvent 範例
+
+<div is:raw>
+
+```json
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.manus_credit",
+  "source": "spendguard-importer-manus",
+  "id": "018f4b15-6d61-7c15-91fe-d0156d61aca0",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/ws_FAKE_team_001/manus/workspace/ws_FAKE_team_001/session/ses_FAKE_team_completed_001",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "ws_FAKE_team_001",
+    "workspace_id": "ws_FAKE_team_001",
+    "session_id": "ses_FAKE_team_completed_001",
+    "tier": "team_plan",
+    "status": "completed",
+    "credits_consumed": 47,
+    "credit_cost_micro_usd": 20526,
+    "amount_micro_usd": 964722,
+    "pricing_version": "manus-credit-v1-2026-06",
+    "model": "manus.session/credit",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "window_start": "2026-06-05T14:00:00Z",
+    "window_end": "2026-06-05T15:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "manus_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "535d5cf688f486cac501436eb24e6357fa6c3677464001a0402e86686a50b0de",
+    "dedupe_key": "manus:ses_FAKE_team_completed_001"
+  }
+}
+```
+
+</div>
+
+## 價目表範例(TOML)
+
+<div is:raw>
+
+```toml
+pricing_version = "manus-credit-v1-2026-06"
+effective_from  = "2026-06-01T00:00:00Z"
+currency        = "USD"
+
+[tiers.team_plan]
+credit_cost_micro_usd = 20526
+# $39/mo / 1900 credits = $0.020526/credit; integer-truncated.
+
+[tiers.enterprise]
+credit_cost_micro_usd = 0
+# Operator override required at deploy time.
+
+[tiers.enterprise_byok]
+credit_cost_micro_usd = 0
+# LOAD-BEARING: BYOK customers pay LLM provider direct.
+```
+
+</div>
+
+## 為什麼我們沒辦法 gate
+
+Manus 的 agent loop **整段都跑在 Butterfly Effect 自己管的 VM
+裡**。客戶的 egress proxy 根本看不到那筆 LLM API call 的 payload —
+Manus VM 是從供應商自己的網路邊界裡面直接撥給 OpenAI / Anthropic。
+admin API 只開放事後的累計 credit 用量,並沒有一個 pre-call 的 hook。
+
+這在 SpendGuard 的 framework-coverage 分析裡屬於 **Archetype IV**:
+一個完全託管的 cloud agent,客戶對網路的可見度是零。唯一可行的整合
+就是對帳 — 事後把帳單拉回來、攤在 dashboard 上、跨過門檻就告警。
+除非 Manus 願意出一個 pre-call webhook,不然 gate 在架構上就是
+做不到。
+
+## dashboard 上你會看到什麼
+
+* 每個 session、每個 workspace 的估算美金 — 標上 `pricing_version`。
+* 消耗的 credits(永遠都在,連 enterprise/BYOK 那種金額為零的 row
+  也有)。
+* `reservation_source = subscription_meter` 這個 filter 會把 Manus
+  的花費跟 Devin(D14)、Genspark(D16)匯入器的 row,以及那些不走
+  BYOK ledger 的 Claude Code Pro / Codex(D13)advisory row 歸在一起。
+* 用 `import_source = manus_team_api` 做 per-importer 的篩選。
+* tier 層級的樞紐分析:`team_plan` vs `enterprise` vs `enterprise_byok`。
+
+## 兄弟匯入器整合
+
+D15 是一個三匯入器 family 的一員,這個 family 涵蓋 agent-vendor 的
+Archetype IV 生態系:
+
+* **[D14 Devin 匯入器](/docs/integrations/devin-importer/)** —
+  Cognition Labs 的 ACU 用量。
+* D15 Manus 匯入器(就是這一頁)。
+* D16 Genspark 匯入器 — Genspark `genspark_team_api` 用量。
+
+三個都遵守同一組鎖定的不變式:`reservation_source =
+subscription_meter`、`import_source = <vendor>_team_api`、deterministic
+UUIDv5 event ID、帶 vendor 前綴的 dedupe key(`devin:` / `manus:` /
+`genspark:`)、預設 build 不碰 HTTP、live mode 在 `live` feature flag
+後面而且只走 rustls。
+
+## 實作指引
+
+* Crate scaffold + Cargo.toml:`services/importer_manus/Cargo.toml`
+  — workspace-excluded、`publish = false`、被 `live` feature gate 起來。
+* Pure 換算:`services/importer_manus/src/audit.rs`
+  (`import_record_to_audit_row`)— 沒有 I/O、不讀 clock、只用整數
+  micro-USD。
+* 價目表:`services/importer_manus/src/pricing.rs` +
+  `assets/price_table.toml` — saturating 算術,負的 credits 直接拒掉。
+* CloudEvent builder:`services/importer_manus/src/cloudevent_envelope.rs`
+  — 透過 `tests/golden/cloudevent_v1alpha1_*.json` 做 golden 測試。
+* Fixture loader:`services/importer_manus/src/fixture.rs` —
+  在 parse 的當下就硬性拒掉非 synthetic 的 ID(`ws_FAKE_*` /
+  `ses_FAKE_*`)。
+* Live client:`services/importer_manus/src/live/client.rs` —
+  只走 rustls 的 `reqwest` wrapper,帶 typed 的 401/403/429/5xx
+  錯誤、以及有上限的 cursor 分頁。
+* Migration:`services/ledger/migrations/0060_import_source_widen_manus.sql`
+  — 把既有的 `audit_outbox.import_source` CHECK 放寬到也含
+  `manus_team_api`。
+
+完整的設計理由跟 slice 層級的拆解,請看
+[`docs/specs/coverage/D15_manus_importer/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D15_manus_importer/design.md)。

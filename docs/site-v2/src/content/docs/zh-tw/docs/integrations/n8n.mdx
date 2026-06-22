@@ -1,0 +1,147 @@
+---
+title: "n8n 社群節點 — n8n-nodes-spendguard"
+description: >-
+  把 Agentic SpendGuard 當成 first-class 的 n8n 社群節點裝起來。SpendGuard
+  Chat Model 子節點會包住任何一個 AI Language Model 子節點,讓 AI Agent
+  發出的每次呼叫都先透過 SpendGuard sidecar 預留 budget,deny 路徑會在
+  provider HTTP 真的打出去之前就先短路掉,commit 則一路掛上 SpendGuard
+  的稽核鏈。
+---
+
+> [n8n](https://n8n.io/) 是目前 self-host 自動化領域裡最主流的 no-code
+> 平台。它的 AI Agent 節點吃一個 `ai_languageModel` 子節點連線
+> (`lmChatOpenAi`、`lmChatAnthropic` 之類)—— 但這些 Chat Model 子節點
+> 是把 prompt 直接送給 provider,沒有任何 pre-call 的拒絕機制,也沒有
+> 以 workflow 為單位的歸屬。SpendGuard 提供 `n8n-nodes-spendguard`
+> 這個社群節點,塞在 Chat Model 跟 AI Agent 中間:它把包住的
+> model 原封不動往下傳,掛上 D04 的 `SpendGuardCallbackHandler`,接著 AI Agent
+> 的 run manager 會在 provider HTTP 打出去之前,先對 SpendGuard sidecar
+> 觸發 `LLM_CALL_PRE`。
+
+## 為什麼 n8n 要用 SpendGuard
+
+n8n 的 `ai_languageModel` 子節點機制,大概是整個 no-code 自動化領域裡
+最乾淨的 pre-call 擴充點了。今天一個會去呼叫 OpenAI / Anthropic /
+Bedrock 的 workflow,沒有 pre-call 的金額閘門、沒有預留、也沒有簽章過的
+稽核。SpendGuard Chat Model 節點塞進去之後就做到這些:
+
+- 在 AI Agent 的 run manager 派發上游 HTTP **之前**,就先拿預估花費去對
+  operator 設定好的 budget 做預留。DENY 會完全跳過上游 —— 整個 workflow
+  執行會冒出 `NodeApiError(httpCode: "403")`,而且 provider 那邊一個
+  token 都不會被計費。
+- 呼叫結束時,透過 D04 的 `handleLLMEnd`,從 provider 的 usage payload
+  把真實的 `inputTokens + outputTokens` commit 進去。
+- 把 n8n 的 `executionId`、節點名稱、以及(選擇性的)由 workflow 作者
+  自訂的 run 識別碼,一路帶進 SpendGuard 的稽核鏈 —— 在 ledger 裡,
+  workflow 的每次執行都是 first-class 的。
+
+## 安裝(self-host 的 n8n)
+
+```bash
+# 1. Enable community packages on your self-hosted n8n.
+export N8N_COMMUNITY_PACKAGES_ENABLED=true
+
+# 2. Install the package.
+n8n npm install n8n-nodes-spendguard
+```
+
+接著,在 n8n 編輯器裡:
+
+1. 打開 **Credentials**,建一個新的 **SpendGuard API** credential:
+   - **Tenant ID** —— 你的 SpendGuard tenant UUID。
+   - **Sidecar UDS Path** —— runner pod 用來連到 SpendGuard sidecar 的
+     Unix domain socket(預設是 `/var/run/spendguard/sidecar.sock`)。
+   - **Budget ID** —— 要計費的那個 SpendGuard budget 的 UUID。
+   - **Window Instance ID** —— 目前生效的 window instance 的 UUID。
+   - **Runtime Kind** —— 預設 `n8n`。
+2. 在任何一個 workflow 裡,把一個 **SpendGuard Chat Model** 節點塞在
+   你的 Chat Model(`lmChatAnthropic`、`lmChatOpenAi`…)跟 **AI Agent**
+   節點之間:
+
+```
+[Chat Model] ──(ai_languageModel)──> [SpendGuard Chat Model] ──(ai_languageModel)──> [AI Agent]
+```
+
+3. 存檔後執行 workflow。從這時候起,AI Agent 派發的每一次 model 呼叫,
+   SpendGuard sidecar 的稽核鏈都會記下來。
+
+## 安裝(n8n Cloud)
+
+n8n Cloud 的 runner 政策擋掉了 UDS / 本機 FS 掛載;社群節點 v0.1.x 只
+鎖定 **self-host**。走 control-plane HTTPS 的替代方案排在 v0.2 的
+roadmap 上。
+
+## 行為對照表
+
+| 路徑                                | 會發生什麼事                                                                                                                                  |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sidecar **ALLOW**                   | `supplyData` 回傳掛好 SpendGuard handler 的上游 model;AI Agent 呼叫該 model;`handleLLMEnd` 把真實 usage commit 進去。  |
+| Sidecar **DENY**                    | Handler 丟出 `DecisionDenied`;AI Agent 的 run manager 把這個 throw 往上傳,最後呈現成 `NodeApiError(httpCode: "403")`。**完全沒有上游 HTTP。** |
+| Sidecar **APPROVAL_REQUIRED**       | `NodeApiError(httpCode: "428")`,description 裡帶著 approval request ID。到 SpendGuard console 核准後重跑。                  |
+| Sidecar **UNAVAILABLE**             | `NodeApiError(httpCode: "503")` —— runner pod 連不到 sidecar UDS。                                                                |
+| Sidecar **HANDSHAKE FAILURE**       | `NodeApiError(httpCode: "502")` —— TLS / SVID 被拒。                                                                       |
+| Response 上有帶 token usage         | Commit 送出真實的 `inputTokens + outputTokens`。INV-5 primary。                                                                |
+| 缺 token usage                      | D04 的 handler 印出 WARN log,然後 fallback 到 estimator 的 snapshot。INV-5 secondary。                                     |
+
+## Run 身分
+
+n8n 的 `executionId` 就是 SpendGuard 的 `sessionId`;節點名稱就是
+`stepId`。`runId` 則由節點的 **Run ID Source** 參數來組:
+
+- `Execution ID + Node Name`(預設)→ `runId = "${executionId}:${nodeName}"`。
+- `Node Name` → `runId = nodeName`。
+- `Custom Expression` → `runId = customRunId`(運算式為空時,fallback
+  回 `${executionId}:${nodeName}`)。
+
+SpendGuard sidecar 收到的 `idempotencyKey`,是來自 `@spendguard/sdk` 的
+`deriveIdempotencyKey({tenantId, sessionId, runId, stepId, llmCallId,
+trigger: "LLM_CALL_PRE"})` 推導 —— 跟 Python 和 TypeScript adapter 用的
+是同一個 helper,所以稽核鏈的 dedup 在每個 framework 上都能一致對上。
+
+## 跟 egress proxy 的取捨對照
+
+你也可以走網路層,用 SpendGuard egress proxy 去 gate n8n 的花費(在
+workflow 的 HTTP Request / Chat Model 節點上設 `OPENAI_BASE_URL`)。兩條
+路徑最後都會接到同一條稽核鏈;看你的 topology 來挑:
+
+| 什麼情境                                                                                       | 走哪條                            |
+| --------------------------------------------------------------------------------------------- | --------------------------------- |
+| 你自己掌握 n8n runtime,而且想要在編輯器 UI 裡有一個 first-class 節點。                          | `n8n-nodes-spendguard`            |
+| 你想在稽核鏈裡有以 workflow / 以 execution 為單位的歸屬。                                        | `n8n-nodes-spendguard`            |
+| n8n 是託管的 Cloud workload,而且你完全不想裝社群節點。                                          | Egress proxy                      |
+| 你想用一份設定,同時涵蓋 n8n 加上其他所有撥同一個 provider 的 tenant 工具。                       | Egress proxy                      |
+
+## 限制
+
+- **不會去包 SpendGuard Tool / Memory。** v0.1.x 只涵蓋
+  `ai_languageModel` 子節點 —— `ai_tool` 跟 `ai_memory` 屬於 contract
+  層的事情,不在範圍內。
+- **沒有跨 step 的 workflow 層級 budget 預留。** 每次 model 呼叫都是它
+  自己獨立的一筆預留;要做跨 workflow 的 budget,就在 AI Agent 前面用一個
+  Code 節點去驅動 `withRunPlan`。
+- **不支援 n8n Cloud。** 託管 runner 連不到 UDS / 本機 FS;Cloud 的場景
+  走 egress-proxy 那條路。
+- **n8n ≥ 1.50。** 更早的版本用的是字串字面值,而不是
+  `NodeConnectionType` enum 常數;這個社群節點在那些版本上會 load 不起來。
+- **只支援 CJS。** 截至 n8n 1.50,n8n 的社群節點 loader 還不支援 ESM 的
+  社群節點。
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=n8n_real
+```
+
+會把 SpendGuard 的基礎 stack(postgres / ledger / sidecar /
+canonical-ingest / outbox-forwarder)拉起來,外加一個 in-network 的計數
+stub,以及一個 Node 20 的 runner,用一個 3-step 的 matrix(ALLOW + DENY
++ STREAM)去走整合的 reserve / commit / release 生命週期。這個 matrix
+會在 SpendGuard ledger 層驗證 INV-1(DENY 跳過上游)跟 INV-5(commit 進去
+的是真實 usage)。
+
+## 原始碼
+
+- 社群節點:`sdk/typescript-n8n/`
+- Demo overlay:`deploy/demo/n8n_real/`
+- 範例 workflow:`examples/n8n/`
+- Spec:`docs/specs/coverage/D37_n8n/`

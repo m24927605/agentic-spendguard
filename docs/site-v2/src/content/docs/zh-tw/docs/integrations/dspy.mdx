@@ -1,0 +1,238 @@
+---
+title: "用 SpendGuard 控管 DSPy 的預算"
+description: >-
+  用 Agentic SpendGuard 替 DSPy 程式（dspy-ai >= 2.6）做呼叫前的
+  token 預算把關。一個 BaseCallback 就涵蓋所有 dspy.LM
+  子類別——不管是走 LiteLLM 路由、OpenAI 直連、Anthropic 直連、
+  還是自訂子類別——因為把關點落在 BaseCallback 邊界，
+  而不是供應商邊界。
+---
+
+> 你的 DSPy 程式跑 `dspy.ChainOfThought("question -> answer")`，
+> 在迴圈裡跑過上千筆輸入。每一輪都會送出一次模型呼叫。
+> 沒有把關的話，等你發現花了多少錢，已經是下個月帳單儀表板上的事了。
+> SpendGuard 透過 `dspy.configure(callbacks=[callback])`
+> 把一個 `SpendGuardDSPyCallback` 接進 DSPy，於是每一次 LM 呼叫，
+> 都會在上游呼叫送出*之前*先對預算做 reserve——而且同一個 callback
+> 不管 DSPy 是走 LiteLLM 路由、直接打供應商 SDK、還是用自訂的
+> `dspy.LM` 子類別，都不用改任何東西就照樣運作。
+
+## 你會想要這個的理由
+
+- **一個 callback，涵蓋所有路由。** DSPy 的 `dspy.LM`
+  本來就是「多型」的——它預設帶 LiteLLM 的路由，但自訂子類別可以完全繞過
+  LiteLLM。把關點落在 `BaseCallback` 邊界，代表同一個 callback
+  實例就把這些情況全包了。
+- **呼叫前就拒絕，不是事後對帳。** DENY 會在 DSPy 派送 LM HTTP
+  *之前*就丟出 `DecisionDenied`。上游呼叫**永遠不會**送出去——
+  這點由 `agent_real_dspy` demo 驗證過，它會斷言在 DENY 那一輪，
+  計數 stub 的命中次數維持不變。
+- **D12 + D21 可以安全共存。** 當 LiteLLM SDK shim（D12）
+  跟這個 DSPy callback（D21）都裝著時，一次 `dspy.Predict(...)`
+  呼叫只會觸發剛好一次 reserve。兩者之間靠一個共用的
+  `_SHIM_IN_FLIGHT` contextvar 協調，所以誰都不會重複 reserve。
+- **稽核 + 核准管線跟其他框架共用。** 這個 callback
+  寫進的 SpendGuard ledger，跟 LangChain、Pydantic-AI、OpenAI Agents、
+  Google ADK、AWS Strands 這些整合用的是同一個。
+
+## D21 還是 D12 該用哪個（決策矩陣）
+
+| 路徑 | 什麼時候用 |
+|------|------------|
+| **D12 LiteLLM shim（傳遞式）** | 你本來就直接用 `litellm` SDK，想一次安裝就涵蓋所有框架呼叫端。DSPy 預設走 LiteLLM 路由，所以 D12 不用任何 DSPy 專屬設定就能傳遞式地把它把關住。 |
+| **D21 BaseCallback（直接式）** | 你想要第一級的 DSPy 把關，或是你用了繞過 LiteLLM 的自訂 `dspy.LM` 子類別，又或者 D12 對你的安裝範圍來說太廣。D21 不管走什麼路由，每一次 `dspy.LM` 呼叫都會觸發。 |
+
+這兩條路徑可以安全地一起裝——共用的
+`_SHIM_IN_FLIGHT` contextvar 會確保兩者同時啟用時，
+一次 `dspy.LM` 呼叫只觸發剛好一次 reserve。
+
+## 安裝設定（60 秒）
+
+```bash
+pip install 'spendguard-sdk[dspy]'
+```
+
+透過 demo stack 把 sidecar 拉起來：
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## 接起來
+
+```python
+import asyncio
+import dspy
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.dspy import (
+    SpendGuardDSPyCallback, BudgetBinding,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="openai.gpt-4o-mini",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def resolve(model_str: str) -> BudgetBinding:
+        # DSPy gates per-LM-call so the resolver maps the LM's
+        # model string ("openai/gpt-4o-mini", "anthropic/claude-3",
+        # "custom-bypass", ...) to the budget binding.
+        return BudgetBinding(
+            budget_id="my-budget", window_instance_id="my-window",
+            unit=unit, pricing=pricing,
+        )
+
+    def reconcile(outputs):
+        first = outputs[0] if outputs else None
+        usage = getattr(first, "usage", {}) or {}
+        total = usage.get("total_tokens", 100)
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget", unit=unit, amount_atomic=str(total),
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    cb = SpendGuardDSPyCallback(
+        client=client,
+        budget_resolver=resolve,
+        claim_reconciler=reconcile,
+    )
+    dspy.configure(
+        lm=dspy.LM("openai/gpt-4o-mini"),
+        # MUST be FIRST in the callbacks list so reserve precedes any
+        # user observer callback.
+        callbacks=[cb],
+    )
+
+    qa = dspy.ChainOfThought("question -> answer")
+    result = qa(question="What is 2+2?")
+    print(result.answer)
+
+
+asyncio.run(main())
+```
+
+**擺放順序很重要。** 這個 callback 一定要排在
+`callbacks=[...]` 清單的**第一個**，這樣 reserve 才會早於任何
+使用者的 observer callback。如果使用者的 callback 先跑，
+它可能會去動到 estimator 拿來做雜湊的 `inputs`，
+那就會在 DSPy 的重試迴圈上破壞掉冪等性。
+
+## 你會得到什麼
+
+- **每一次 `dspy.LM` 呼叫都做呼叫前的預算 reserve**，
+  包含 `dspy.Predict` / `dspy.ChainOfThought` / `dspy.ReAct`
+  以及自訂模組裡面的 LM 呼叫。
+- **D12 + D21 共存。** 兩者都裝著時，共用的
+  `_SHIM_IN_FLIGHT` contextvar 會確保每次呼叫剛好一次 reserve。
+- **涵蓋自訂 LM 子類別。** DSPy 的 `BaseCallback` 對**任何**
+  `dspy.LM` 子類別都會觸發，包含那些繞過 LiteLLM、
+  直接打供應商 SDK 的子類別。
+- **DEGRADE 預設 fail closed。** 設 `SPENDGUARD_DSPY_FAIL_OPEN=1`
+  （環境變數）或 `fail_closed=False`（建構子參數），
+  就會切到只該用在 dev 的 fail-open 行為。
+
+## 限制
+
+D21 v1 明確地**不**處理以下任何一項：
+
+- **逐 token 的串流把關。** `on_lm_end` 只回報整次呼叫結束時的用量；
+  呼叫過程中的串流 token 不會被把關。
+- **`on_tool_start` / `on_tool_end` callback。** 工具的花費會併進
+  上層 LM 的 reservation。逐工具的預算留給 D21.1 處理。
+- **`on_module_start` / `on_module_end` callback。** 這層級拉得比需要的高——
+  在 LM 邊界把關已經把它涵蓋進去了。
+- **非同步的 DSPy callback。** DSPy >= 2.6 的 hook 是同步的。
+  如果從一個正在跑的 event loop 裡面呼叫，callback 會丟出
+  `SyncInAsyncContext`——請從同步的進入點跑 DSPy，
+  或是直接透過 `SpendGuardClient` 預先送出 reservation。
+
+這些都記在 `D21_dspy/design.md` 的 §3 non-goals 章節，
+讓維運人員的預期能對上實際出貨的功能範圍。
+
+## 常見模式
+
+### 跨框架的 run_id 關聯
+
+```python
+from spendguard.integrations.dspy import RunContext
+
+def factory():
+    # Bridge a parent LangChain / Strands / pydantic-ai run_id into
+    # the DSPy gate so all four adapters share one trace.
+    return RunContext(run_id="my-parent-run-1")
+
+cb = SpendGuardDSPyCallback(
+    client=client,
+    budget_resolver=resolve,
+    claim_reconciler=reconcile,
+    run_context_factory=factory,
+)
+```
+
+DSPy 本身**不**帶一個穩定的 run-scope 識別碼（`call_id`
+是逐 LM 呼叫的）。只有當你想做跨框架關聯時，才需要提供這個 factory。
+
+### DENY 行為
+
+當 `request_decision` 回傳 DENY 時，這個 callback 會：
+
+1. 直接從 `on_lm_start` 丟出 `DecisionDenied`。
+2. DSPy 在派送 LM HTTP 之前，就把這個例外往呼叫端拋上去：
+   ```python
+   from spendguard.integrations.dspy import DecisionDenied
+   try:
+       result = qa(question="...")
+   except DecisionDenied as exc:
+       # handle the budget refusal
+       ...
+   ```
+3. 模型 HTTP **永遠不會**送出去（由 `agent_real_dspy` demo 驗證）。
+4. 不會留下任何東西——沒有 commit、也沒有 release 被觸發。
+
+### DEGRADE 行為
+
+DEGRADE 的意思是 sidecar 回了一個非 CONTINUE 的結果，
+而 adapter 不該因為它而擋下呼叫（例如一個暫時性的降級）。
+預設情況下 callback 會 fail closed，丟出 `SpendGuardDegradeBlocked`。
+設 `fail_closed=False` 或 `SPENDGUARD_DSPY_FAIL_OPEN=1` 就會放行這次呼叫；
+這種情況下不會產出 commit row（reservation 會被 TTL 掃掉）。
+
+### 自訂 `dspy.LM` 子類別（繞過 D12）
+
+```python
+class MyCustomLM(dspy.LM):
+    def __init__(self):
+        super().__init__(model="custom-bypass")
+
+    def basic_request(self, prompt, **kwargs):
+        # Hit your provider SDK directly, bypassing LiteLLM.
+        return my_provider.complete(prompt)
+
+dspy.configure(lm=MyCustomLM(), callbacks=[cb])
+```
+
+`on_lm_start` 跟 `on_lm_end` 在每一次呼叫上都還是照樣觸發。
+`budget_resolver` 收到的是 `"custom-bypass"`，再由它決定要扣哪個預算。
+這就是那個關鍵的「繞過 D12」涵蓋性證明——`agent_real_dspy`
+demo 的第 3 步跑的就是這個模式。
+
+## 相關文件
+
+- [Quickstart](/docs/quickstart/) — 5 分鐘把整個 stack 拉起來
+- [Contract DSL 參考](/docs/contracts/yaml/) — 撰寫 allow/stop 規則
+- 其他整合：[LiteLLM SDK shim（D12 傳遞式）](/docs/integrations/litellm-sdk-shim/) · [Pydantic-AI](/docs/integrations/pydantic-ai/) · [LangChain & LangGraph](/docs/integrations/langchain/) · [OpenAI Agents SDK](/docs/integrations/openai-agents/) · [Google ADK](/docs/integrations/adk/) · [AWS Strands](/docs/integrations/aws-strands/)

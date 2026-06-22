@@ -1,0 +1,138 @@
+---
+title: "订阅档位计量器(Claude Code Pro + ChatGPT Plus 上的 Codex)"
+description: >-
+  面向固定月费订阅套餐的尽力计量器:这类场景下 SpendGuard 无法真正卡住
+  美元额度(由提供商内部结算),但能估算零售价美元、在软上限触发告警,
+  也可选择用一个合成 429 硬上限直接短路。
+sidebar:
+  badge:
+    text: Advisory
+    variant: note
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="只计量,不强制">
+  Anthropic / OpenAI 的订阅配额是**内部**结算的。这个计量器只是按零售
+  token 单价做的一个建议性估算 —— 在没有真正 BYOK 账本流水的前提下,
+  这已经是 SpendGuard 能逼近美元口径的极限了。一旦各家提供商上线
+  Admin Usage API,实时对账会直接复用这套完全一样的审计行结构。
+</Aside>
+
+## 为什么我们卡不住美元额度
+
+Claude Code Pro/Max 以及 ChatGPT Plus/Pro 上的 Codex 用的是 OAuth
+订阅。流量照样打到 `api.anthropic.com/v1/messages` 和
+`chatgpt.com/backend-api/codex/responses`,所以代理能看到这些调用 ——
+但 Anthropic 和 OpenAI 是按固定月费在内部扣配额的。如果 SpendGuard 的
+BYOK 账本对每个 token 按零售价计费,那就等于在 $20/mo 套餐之上又凭空
+造出一笔幻影美元。
+
+为此,**subscription_meter** 模式的做法是:
+
+* 在开启账本事务**之前**,先把每个请求分类成 BYOK 还是订阅。
+* 对订阅请求,只跑一次**纯计量估算**(tokens × 零售单价 ÷ 1M),并给
+  审计行打上 `reservation_source = subscription_meter` 标记。
+* 跳过 `ledger_entries` 和 `reservations` 两张表的写入 —— 计量行本身
+  就是权威记录。
+
+## 三种模式
+
+| 模式        | 默认 | 行为                                              |
+|-------------|:----:|--------------------------------------------------|
+| `meter`     |  ✅  | 仅估算;不告警、不拦截。                          |
+| `soft_cap`  |      | 到达 `alert_at_atomic` 时发出 `subscription_soft_cap_alert`;CONTINUE。 |
+| `hard_cap`  |      | 到达 `hard_cap_at_atomic` 时短路 DENY + 合成 429。 |
+
+模式按租户配置,走 `subscription_caps` 表(cap-aware SQL 下个切片才上;
+目前 sidecar 从 `DecisionRequest.runtime_metadata.subscription` 读阈值)。
+
+## 分类
+
+分类器要求**两个**信号同时命中,才把一个请求判定为订阅:
+
+| 信号 | Claude Code Pro | Codex / ChatGPT-OAuth |
+|--------|------------------|------------------------|
+| `Authorization` 前缀 | `sk-ant-oat01-…` | `eyJ…`(JWT header) |
+| `User-Agent` | `claude-cli/<ver>` 或 `claude-code/<ver>` | `codex_cli_rs/<ver>` |
+| BYOK 区分标识 | `sk-ant-api03-…` | `sk-proj-…` / `sk-…` |
+
+单看 UA 是可伪造的(运维经常拿 `claude-cli` 配一把 BYOK key 用);
+单看 token 也不够,因为 OAuth token 比 CLI 二进制更容易泄露。两个都得
+命中 —— 见
+[`classifier.rs`](https://github.com/m24927605/agentic-spendguard/blob/main/services/sidecar/src/subscription_meter/classifier.rs)。
+
+## 硬上限合成 429
+
+当 `hard_cap` 模式开启,且预估的计量消耗越过 `hard_cap_at_atomic` 时,
+sidecar 会在进账本之前就短路:
+
+```json
+{
+  "error": {
+    "type": "rate_limit_exceeded",
+    "message": "spendguard subscription cap reached",
+    "code": "spendguard_subscription_cap"
+  }
+}
+```
+
+这个结构是**对齐提供商口径**的,所以 claude-cli / codex_cli_rs 会把它
+当成提供商返回的 429 一视同仁地处理,然后干净退出。专门留的那个
+`code = "spendguard_subscription_cap"` 让运维能在自己的 dashboard 里
+区分:哪些 429 是 SpendGuard 注入的、哪些是提供商注入的。
+
+`Retry-After` 上限封到 86 400 s(24 h)—— 防止配错的 cap 窗口让 CLI
+干等超过一天。
+
+## 迁移与 schema
+
+D13 上了三条增量迁移:
+
+* `0044_subscription_meter.sql` —— `subscription_meters` 表 +
+  `audit_outbox.reservation_source` 字段。
+* `0045_subscription_alerts.sql` —— `subscription_alerts` 表,带冷却期
+  (默认 1 h,跟 `stats_aggregator` 的 drift_alert 对齐)。
+* `0046_subscription_importer.sql` —— `subscription_import_jobs` 表 +
+  `audit_outbox.import_source` 字段。
+
+三条都开了 RLS,用标准的 tenant-id 隔离策略。见
+[`services/ledger/migrations/`](https://github.com/m24927605/agentic-spendguard/tree/main/services/ledger/migrations)。
+
+## 导入器桩
+
+固定月费计量器是尽力而为的。要拿提供商的账单报表去校准它,D13 上了一批
+**桩**导入器 crate,先把 Day-2 对账的契约锁死:
+
+```rust
+pub fn import_record_to_audit_row(rec: &ImportRecord) -> AuditRowDraft {
+    AuditRowDraft {
+        tenant_id: rec.tenant_id.clone(),
+        reservation_source: "subscription_meter",
+        import_source: rec.importer_kind.as_str(),
+        ..
+    }
+}
+```
+
+D14 / D15 / D16 点亮 Devin / Manus / Genspark 的实时导入器。Anthropic
+Console Usage 和 OpenAI Admin Usage 则一直保持桩状态,等各自的 Admin API
+上线再说。
+
+## Demo
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=subscription_meter
+```
+
+跑三个 cap 决策场景(PASS / SOFT / HARD),断言硬上限响应带的
+`Retry-After ∈ [1, 86_400]`,并校验那条最关键的不变式:在计量租户下
+`ledger_entries` **零**行、`reservations` 也**零**行。
+
+见 [`deploy/demo/subscription_meter/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/subscription_meter/README.md)。
+
+## 另见
+
+* [设计 —— `docs/specs/coverage/D13_subscription_meter/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D13_subscription_meter/design.md)
+* [实现骨架 —— `implementation.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D13_subscription_meter/implementation.md)
+* [评审标准 —— `review-standards.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D13_subscription_meter/review-standards.md)

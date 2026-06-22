@@ -1,0 +1,189 @@
+---
+title: "用 SpendGuard 给 Agno 做预算管控"
+description: >-
+  用 Agentic SpendGuard 为 Agno(agno >= 2.0)在调用前强制执行 token
+  预算。一对 pre/post hook 覆盖所有 Agno Model
+  provider —— OpenAIChat、Claude、Gemini、Groq、xAI、DeepSeek —— 因为
+  gating 落在 agent-runtime 边界,而不是 model 边界。
+---
+
+> 你的 Agno `Agent` 在几百条输入上跑 `await agent.arun(prompt)` 循环,
+> 每一轮都派发一次 model 调用。没有 gate,你只能等下个月的账单
+> dashboard 才知道花了多少钱。SpendGuard 通过
+> `Agent(pre_hooks=[pre()], post_hooks=[post()])` 往 Agno 里插一对
+> `(pre_hook, post_hook)`,让每次 model invocation 在上游调用发出
+> *之前* 就先对预算做 reserve —— 而且同一对 hook 对 OpenAIChat、
+> Claude、Gemini、Groq、xAI、DeepSeek backend 都通用,零改动。
+
+## 为什么要用它
+
+- **一对 hook,所有 backend 通吃。** Agno 的 `Model` 抽象是多态的
+  (OpenAIChat / Claude / Gemini / Groq / xAI / DeepSeek /
+  自定义)。在 agent-runtime 边界做 gating,意味着同一对 factory
+  覆盖全部 backend,不用为每个 vendor 单独写 wrapper。
+- **调用前直接拒绝,不是事后记账。** DENY 会以 Agno 的
+  `InputCheckError` 形式抛出(原始 `DecisionDenied` 通过
+  `__cause__` 链上去),发生在 Agno 派发 model HTTP **之前**,
+  上游调用**绝不**会发出去。
+- **靠数据结构而非字符串做 provider-agnostic。** 直接读
+  `run_output.metrics.total_tokens`(或 `input_tokens + output_tokens`
+  作为 fallback)—— 不需要解析任何 model 字符串。
+- **审计 + 审批流水线和其他 framework 共用。** 这对 hook 写入的
+  SpendGuard ledger,跟 LangChain、Pydantic-AI、OpenAI Agents、
+  Google ADK、AWS Strands、DSPy 这些集成是同一个。共享的
+  `spendguard_run_context` contextvar 意味着:如果外层有一个
+  LangChain run 包着 Agno agent,两边会复用同一个 `run_id`。
+
+## 配置(60 秒)
+
+```bash
+pip install 'spendguard-sdk[agno]'
+```
+
+用 demo stack 起一个 sidecar:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## 接线
+
+```python
+import asyncio
+
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.agno import (
+    RunContext, SpendGuardAgnoPreHook, SpendGuardAgnoPostHook,
+    run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    pre = SpendGuardAgnoPreHook(
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+    )
+    post = SpendGuardAgnoPostHook(
+        client=client,
+        unit=unit,
+        pricing=pricing,
+    )
+
+    agent = Agent(
+        model=OpenAIChat(id="gpt-4o-mini"),
+        pre_hooks=[pre()],
+        post_hooks=[post()],
+    )
+
+    async with run_context(RunContext(run_id="my-run-1")):
+        response = await agent.arun("Say hello in three words.")
+    print(response.content)
+
+
+asyncio.run(main())
+```
+
+**factory 调用很关键。** `pre_hooks=[pre()]` —— 注意那个 `()`。
+`SpendGuardAgnoPreHook` 实例是个 factory,调用它会返回 Agno 用
+`inspect.signature` 去内省的那个 closure。`SpendGuardAgnoPostHook`
+同理。
+
+## 工作原理
+
+Agno 的 `Agent.arun(...)` 在构建好 run context 之后先走一遍
+`pre_hooks`,然后派发 model HTTP,最后带着 run output 走一遍
+`post_hooks`。每个 hook 都会被 `inspect.signature` 对着 Agno 内部的
+`all_args` dict 做过滤 —— closure 只拿到它自己声明的那些参数。
+
+SpendGuard 的 pre-hook 声明 `(agent, run_input)`,做这些事:
+
+1. 从共享 contextvar 里解析出 `RunContext.run_id`。
+2. 在 `agent.model.id || run_input` 上算出一个稳定的 signature。
+3. 通过 `derive_uuid_from_signature` 派生出确定性的 `llm_call_id` /
+   `decision_id` / `idempotency_key`,这样重试会命中 sidecar 的
+   cache。
+4. 调用 `client.request_decision(LLM_CALL_PRE, ...)`。
+5. 把 reservation 按 `(run_id, signature)` 存进一个上限 10k 的 FIFO
+   map。
+6. 遇到 STOP / DENY,把 `DecisionDenied` 包成 Agno 的
+   `InputCheckError`,这样 Agno 的 hook 循环才会真的把 run 停掉
+   (Agno 的 runtime 会 catch `Exception`,但只重新抛出
+   `Input/OutputCheckError` —— 见下面的 DEVIATION-1)。
+
+post-hook 声明 `(agent, run_output)`,做这些事:
+
+1. 从 `run_output.input` 重新算出同一个 signature。
+2. 把 inflight 槽位 pop 出来。如果没有,记一条 warning 然后
+   no-op —— 绝不会在没有对应 reserve 的情况下 commit。
+3. 从 `run_output.metrics` 里提取 `total_tokens`(优先取
+   `total_tokens`,fallback 到 `input_tokens + output_tokens`)。
+4. run 正常时调用 `client.emit_llm_call_post(SUCCESS, ...)`。
+5. 当 `status == ERROR` / `run_output.error` 被置位时,emit
+   `outcome=PROVIDER_ERROR`,让 projector 把 reservation 释放掉
+   (不漏)。
+
+## 多 model 的 `Team` agent
+
+单个 `SpendGuardAgnoPreHook` 实例就能处理多 model 的 `Team` agent,
+因为默认的 claim estimator 是在 CALL 时刻解析 `agent.model.id`,
+不是在构造时刻。你不需要为每个 backend 配一对 hook。
+
+## 跟 spec 的偏差(DEVIATIONS)
+
+D22 的 design.md 是对着一个 Agno 1.x 的提案写的,而那个提案并没有
+真正发布 `pre_hooks` / `post_hooks` 这套接口;这套接口是在 Agno 2.x
+才定型的。最终发布的 adapter 锁定 `agno>=2.0,<3`,并对齐 2.x 的
+实际 contract:
+
+| 偏差 | spec 说的 | 实际情况 | 解决方案 |
+|---|---|---|---|
+| DEVIATION-1 | `STOP / DENY raises DecisionDenied; Agno propagates` | Agno 2.x 的 hook 循环只重新抛出 `Input/OutputCheckError`;其他异常都只是记日志 + model 照样被调用 | pre-hook 把 `DecisionDenied` 包成 `InputCheckError`。原始异常链在 `__cause__` 上,下游的 catch 仍然能正常工作 |
+| DEVIATION-2 | post-hook 声明 `(agent, run_response)` | Agno 2.x 把结果放在 `run_output` 下传递,并按参数名过滤 | post-hook closure 声明 `(agent, run_output)`。测试会断言这个字面名字 |
+
+两个偏差都在模块 docstring 里记了文档,并由单元测试套件覆盖
+(`tests/integrations/agno/test_agno_pre_post.py`
+T16 / T17 / T28)。
+
+## 局限
+
+D22 v1 明确**不**解决以下任何一项:
+
+- **逐 token 的流式 gating。** 通过 `Agent.arun(stream=True)` 的流式
+  调用,只在 PRE(开流之前)和 POST(收流之后)做 gate。中途的
+  chunk 不会单独 gate。
+- **`tool_hooks` 的 per-tool 预算 gating。** tool 的开销会汇总到
+  父 LM reservation 里。per-tool 预算留给 D22.1。
+- **DEGRADE 的 mutation patch 应用。** 以 `MutationApplyFailed` 形式
+  抛出,而不是真的应用(和 pydantic-ai / langchain 集成保持一致)。
+- **审批-恢复(approval-resume)UI。** `ApprovalRequired` 会向上
+  传播(按 DEVIATION-1 包成 `InputCheckError`);恢复逻辑由调用方
+  自己处理。
+
+## 参考
+
+* Spec: `docs/specs/coverage/D22_agno/`
+* 模块: `sdk/python/src/spendguard/integrations/agno/`
+* Demo overlay: `deploy/demo/agent_real_agno/`
+* 测试套件: `sdk/python/tests/integrations/agno/`

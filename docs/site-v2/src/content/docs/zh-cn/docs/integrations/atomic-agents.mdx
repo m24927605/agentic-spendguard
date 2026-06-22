@@ -1,0 +1,318 @@
+---
+title: "用 SpendGuard 为 Atomic Agents (Instructor) 做预算管控"
+description: >-
+  基于 Agentic SpendGuard，为 Atomic Agents (BrainBlend AI)
+  + Instructor (Jason Liu) 提供调用前的 token 预算管控。通过组合包装
+  Instructor 对象，每一次调用——包括 Instructor 的校验重试循环——
+  都会单独拿一次 reservation。
+---
+
+> 你的 Atomic Agents `BaseAgent` 用一个 Pydantic `output_schema` 跑
+> `agent.run({...})`，校验失败时 Instructor 会重新向 provider 发起
+> prompt。如果你只包装底层 provider SDK，就会漏掉每一次重试——成本
+> 被悄悄少算、审计链也断了。SpendGuard 通过组合包装的是 **Instructor
+> 对象**，所以每一次调用、包括重试循环，都会在 provider 的 HTTP
+> 发出之前拿到一次 reservation。
+
+## 为什么要用这个
+
+- **按每次 attempt 管控，而不是按外层调用管控。** Pydantic 每次拒绝
+  解析结果，Instructor 的校验重试循环就会重新向 provider 发 prompt。
+  SpendGuard 拦的是每次 attempt 走的底层 provider 方法
+  (`inner.client.chat.completions.create`)，所以每一次重试 attempt
+  都会单独拿一次 reservation。如果包装外层的
+  `chat.completions.create_with_completion`，整个重试循环只会管控一次
+  ——少算。
+- **一个 wrapper，覆盖所有 provider。** Instructor 把 OpenAI /
+  Anthropic / Gemini / Cohere 统一到一个 `Instructor` /
+  `AsyncInstructor` 对象后面。SpendGuard 通过组合包装这个对象；同一个
+  wrapper 实例覆盖每一个后端。
+- **调用前拒绝，而不是事后记账。** DENY 直接从被管控的底层方法抛出
+  `DecisionDenied`。Atomic Agents 的 `BaseAgent.run` 在 create-call
+  路径上没有框架侧的 catch（已对 `atomic-agents==2.8.0` 验证过），所以
+  这个 raise 干净地传到调用方——上游 provider 的调用**绝不会**发出。
+- **审计 + 审批流水线与其他所有框架共享。** wrapper 写入的是和
+  LangChain、Pydantic-AI、OpenAI Agents、Google ADK、AWS Strands、
+  DSPy、Agno、BeeAI、AutoGen、SmolAgents、Letta、LlamaIndex 等集成同一个
+  SpendGuard ledger。共享的 `spendguard_run_context` contextvar
+  （复用自 `spendguard.integrations.openai_agents`）意味着，一个外层
+  LangChain run 包住一次 Atomic Agents 调用时，会复用同一个 `run_id`。
+
+## 安装（60 秒）
+
+```bash
+pip install 'spendguard-sdk[atomic-agents]'
+# Transitively pulls atomic-agents>=2.0,<3 + instructor>=1.5,<2.0.
+```
+
+通过 demo 栈拉起一个 sidecar：
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## 为什么要包装 Instructor
+
+Atomic Agents 是 Pydantic-first 的；`BaseAgent` 通过
+`BaseAgentConfig(client=<instructor>, ...)` 构造，运行时调用
+`self.client.chat.completions.create_with_completion(response_model=output_schema, ...)`。
+这里没有一等公民的 LLM-call 中间件。两个候选管控点：
+
+| 候选方案 | 覆盖范围 | 结论 |
+|-----------|----------|---------|
+| 在 `instructor.from_openai(...)` 之前包装底层 provider SDK | 漏掉**每一次** Instructor 校验重试——重试循环调用的是 Instructor 打了补丁的 `create_fn`，它在 `from_openai` 时就捕获并持有了底层方法的引用 | **驳回** |
+| 包装 **Instructor 对象** + 拦截每次 attempt 走的底层 provider 方法 | 每一次调用、每一次重试——各自拿到一次 reservation | **采用** |
+
+驳回的「包装底层 SDK」方案看着更简单，但它会悄悄少算 Instructor 的
+重试，因为打了补丁的 `create_fn` 调用的是**闭包捕获的**底层方法，
+而不是每次都重新查一次 `client.chat.completions.create`。在
+`instructor.from_openai(...)` **之后**再包装底层 client，并不会改变
+`create_fn` 调用的目标。
+
+## 接起来
+
+```python
+import asyncio
+import instructor
+from openai import OpenAI
+from atomic_agents.agents.base_agent import BaseAgent, BaseAgentConfig
+from pydantic import BaseModel
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.atomic_agents import (
+    wrap_instructor_client,
+    RunContext, run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+class Answer(BaseModel):
+    final: str
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def estimate(kwargs):
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget",
+            unit=unit,
+            amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    raw_instructor = instructor.from_openai(OpenAI(), mode=instructor.Mode.TOOLS)
+    guarded = wrap_instructor_client(
+        raw_instructor,
+        spendguard_client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate,
+    )
+
+    agent = BaseAgent(BaseAgentConfig(
+        client=guarded,
+        model="gpt-4o-mini",
+        system_prompt_generator=...,
+        input_schema=...,
+        output_schema=Answer,
+    ))
+
+    async with run_context(RunContext(run_id="my-run-1")):
+        result = agent.run({"query": "What's 2+2?"})
+    print(result.final)
+
+
+asyncio.run(main())
+```
+
+**`claim_estimator` 是必填的。** 按 design.md §5，wrapper 不内置默认
+estimator，因为 Instructor 的多语言路由（OpenAI / Anthropic / Gemini
+/ Cohere）让任何单一默认值都是错的。projection 由 operator 提供——
+`claim_estimator` 拿到的是完整的 kwargs dict（model / messages /
+response_model / tools / tool_choice），这样它就能做 provider 感知的
+claim projection。
+
+## 工作原理
+
+```text
+BaseAgent.run({...})
+  → guarded.chat.completions.create_with_completion(
+        model=..., messages=..., response_model=output_schema, ...)
+    → inner.create_with_completion(...)        [Instructor's outer call]
+      └─ retry_sync(func=guarded_raw_create, ...)
+          └─ for each attempt:
+              ├─ guarded_raw_create(messages, **kwargs)
+              │   ├─ ctx = current_run_context()
+              │   ├─ signature = blake2b(messages | model
+              │   │     | response_model.qualname | tools | tool_choice)
+              │   ├─ sidecar.RequestDecision(LLM_CALL_PRE)
+              │   │     ALLOW → call original raw create
+              │   │     DENY  → raise DecisionDenied (no inner HTTP)
+              │   ├─ result = original_raw_create(messages, **kwargs)
+              │   └─ sidecar.emit_llm_call_post(SUCCESS|FAILURE|CANCELLED,
+              │                                  estimated=usage.total_tokens)
+              └─ Instructor's process_response parses + retries if
+                 Pydantic rejects → re-enters the loop, fresh gate
+                 fires with mutated messages (different signature →
+                 different llm_call_id → fresh reservation)
+```
+
+proxy 做的事：
+
+1. 通过 `inner.client.chat.completions.create`（或回退到
+   `inner.create_fn.__wrapped__`）定位底层 provider 方法。
+2. 用一个同步/异步的被管控闭包把它包起来，闭包做 PRE / inner / POST。
+3. 重跑 `instructor.patch(create=gated_raw, mode=inner.mode)`，铸出一个
+   新的 `create_fn`，让 Instructor 的重试循环跑在被管控的底层方法上。
+
+每一次 Instructor 重试 attempt 都会自然地重新进入这道关口，因为
+Instructor 的 `retry_sync` / `retry_async` 每次 attempt 都调用（如今
+已被管控的）底层方法。重试时的 `messages` 因为注入了校验错误
+（Instructor 的 `handle_reask_kwargs`）而不同，于是 `_signature(kwargs)`
+发散 → 每次 attempt 都有新的 `llm_call_id`——而且不需要显式的重试
+计数器（review-standards §2.2 把显式计数器列为 Blocker，因为那会把
+wrapper 耦合到 Instructor 的内部重试状态）。
+
+## 与 spec 的偏差
+
+### DEVIATION-A —— `atomic-agents>=2.0,<3` 的 pin
+
+spec 里 pin 的是 `atomic-agents>=1.0,<2.0`。现实（2026-06-08）：实际的
+PyPI 发布线是 2.x，最新版是 `2.8.0`。我们 pin `>=2.0,<3`，让这个 extra
+对未来的破坏性大版本（3.x 线）fail-closed，并以 `BaseAgent` /
+`BaseAgentConfig(client=<instructor>)` 进入 GA 的版本为下限。
+
+### DEVIATION-B —— 子包布局
+
+spec 指定的是单个扁平的 `atomic_agents.py` 模块。我们拆成了一个
+`atomic_agents/` 子包，对齐 autogen / beeai / dspy 的布局：缺少 extra
+时 import-time guard 能干净触发，同时 `_hook` 保持可直接 import 给测试
+用。
+
+### DEVIATION-C —— 在底层 provider 方法上管控，而不是 `create_with_completion`
+
+spec 描述的是在 `chat.completions.create_with_completion` 上管控，理由是
+「Instructor 的内部重试会重新进入这个 proxy → 各自拿到一次
+reservation」。现实（已对 `instructor==1.14.5` 和 `1.15.1` 验证）：
+Instructor 的外层 `create_with_completion` 只调用一次；接着
+`instructor.core.retry.retry_sync` 每次 attempt 调用 `self.create_fn`，
+也就是那个被 `instructor.patch` 包装、其重试循环每次 attempt 调用底层
+provider 方法的函数。真正起作用的拦截点是底层 provider 方法，而不是外层
+的 chat-completions 接口。
+
+## 多语言 run-context 共享
+
+`RunContext` / `run_context()` / `current_run_context()` 这几个符号是从
+`spendguard.integrations.openai_agents` re-export 出来的（当
+`[openai-agents]` extra 没装时，会回退到 contextvar 名等价的实现）。一个
+在同一个 run 里混用 OpenAI Agents、AutoGen、LlamaIndex 和 Atomic Agents
+的多语言栈会共享同一条 trace，因为这四个 adapter 读的都是模块级的同一个
+`spendguard_run_context` contextvar。
+
+```python
+from spendguard.integrations.openai_agents import RunContext, run_context
+
+async with run_context(RunContext(run_id="polyglot-run-1")):
+    # Both calls land under the same run_id in the ledger:
+    await openai_agents_runner.run(agent, "...")
+    atomic_agent.run({"query": "..."})
+```
+
+## 异步路径
+
+当你通过 `instructor.from_openai(AsyncOpenAI(...))` 构建 Instructor 时，
+工厂会自动 dispatch 到 `SpendGuardAsyncInstructorProxy`。
+`agent.run_async(...)`（在支持的地方）原样可用——直接 `await` sidecar，
+没有 `asyncio.run` 的桥接。
+
+```python
+from openai import AsyncOpenAI
+raw = instructor.from_openai(AsyncOpenAI())  # AsyncInstructor
+guarded = wrap_instructor_client(raw, ...)   # SpendGuardAsyncInstructorProxy
+
+async with run_context(RunContext(run_id="async-run-1")):
+    parsed, raw = await guarded.chat.completions.create_with_completion(
+        model="gpt-4o-mini", response_model=Answer,
+        messages=[{"role": "user", "content": "..."}],
+    )
+```
+
+## 在 async 上下文里用 sync proxy
+
+sync proxy 通过 `asyncio.run(...)` 桥接到 async sidecar。在一个正在运行的
+event loop 内部，这会抛 `RuntimeError`；SpendGuard 把它呈现为一个带类型
+的 `_SyncInAsyncContext`（`SpendGuardConfigError` 的子类）。错误信息会把
+operator 指向 `AsyncInstructor` 这个解法：
+
+```python
+# WRONG — sync proxy inside async context.
+async def bad():
+    raw = instructor.from_openai(OpenAI())  # sync
+    guarded = wrap_instructor_client(raw, ...)
+    # This raises _SyncInAsyncContext:
+    parsed, _ = guarded.chat.completions.create_with_completion(...)
+
+# RIGHT — async proxy.
+async def good():
+    raw = instructor.from_openai(AsyncOpenAI())  # async
+    guarded = wrap_instructor_client(raw, ...)
+    parsed, _ = await guarded.chat.completions.create_with_completion(...)
+```
+
+## provider 路由说明
+
+operator 必须挑一个与内层 Instructor 的 provider 匹配的
+`claim_estimator`：
+
+- OpenAI：`spendguard.integrations.openai_agents._default_estimator`
+  覆盖这种情况。
+- Anthropic：从 Anthropic `messages.create` 的 kwargs 形状
+  （`messages`、`max_tokens`、`system`）来 project。
+- Gemini：从 `generationConfig.maxOutputTokens` 和 `contents` 来 project。
+- Cohere：从 `chat` 的 `max_tokens` 和 `message` 来 project。
+
+estimator 拿到的是完整的 kwargs dict，这样它就能在 project reservation
+金额之前，先 introspect 出 Instructor 这次打的是哪个 provider。
+
+## 另请参阅
+
+- [LlamaIndex (Python)](/docs/integrations/llamaindex/) —— 另一个基于
+  组合包装 client 对象的方案。
+- [Letta (Python)](/docs/integrations/letta/) —— 同样的模式，不同的框架。
+
+## 限制
+
+D28 v1 明确**不**覆盖以下任何一项：
+
+- **流式。** `instructor.Partial[...]` / `Iterable[...]` 不在 POC 范围内；
+  只在通过 Instructor 标准的 `create_with_completion` 路径拿到最终解析
+  结果之后才 commit。
+- **Anthropic 原生的 messages 接口**（`client.messages.create`）。
+  Atomic Agents 文档用的是 `chat.completions`。
+- **直接给 `BaseAgent` 打补丁。** 那个接口每个 release 都在变；包装
+  Instructor 才是向前稳定的。
+- **包装 Instructor 的 `Mode` 选择逻辑。** 那是 Instructor 自己的事。
+
+## 参考
+
+* Spec: `docs/specs/coverage/D28_atomic_agents/`
+* Module: `sdk/python/src/spendguard/integrations/atomic_agents/`
+* Demo overlay: `deploy/demo/agent_real_atomic_agents/`
+* Test suite: `sdk/python/tests/integrations/atomic_agents/`

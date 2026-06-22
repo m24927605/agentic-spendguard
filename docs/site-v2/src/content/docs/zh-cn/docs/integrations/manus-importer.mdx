@@ -1,0 +1,242 @@
+---
+title: "Manus 账单导入器（Butterfly Effect — 仅对账）"
+description: >-
+  针对 Manus 管理端 REST 额度用量的事后导入器。SpendGuard 无法
+  对 Manus 的开销做拦截——Manus 在厂商托管的 VM 里运行每个 agent
+  任务。导入器拉取聚合后的额度消耗，通过内置的 TOML 价格表换算成
+  估算的美元金额，再发出带签名的审计事件，打上
+  reservation_source=subscription_meter /
+  import_source=manus_team_api 标签。
+sidebar:
+  badge:
+    text: Reconciliation only
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="SpendGuard 无法拦截 Manus 开销——只有 Manus 能">
+  Manus（Butterfly Effect，2026 年被 Meta 收购）在厂商托管的 VM 里
+  运行每个 agent 任务。客户的网络上根本不会流经单次 LLM 调用的
+  payload；egress proxy 和 SDK adapter 什么都截不到。Manus 导入器
+  **仅做对账**——它把事后产生的额度用量拉过来，让 dashboard 上
+  CIO/CFO 的 single-pane-of-glass 视图不至于缺一块，但它**不会**对
+  Manus 会话做 gate、限流或短路。那份契约属于 Manus。
+  架构层面的推理见
+  [framework-coverage 策略备忘录 Archetype IV](https://github.com/m24927605/agentic-spendguard/blob/main/docs/strategy/framework-coverage-2026-06.md)。
+</Aside>
+
+## 这是什么
+
+`spendguard-importer-manus` crate（D15）是一个 Rust 二进制 +
+库，它会：
+
+1. 从 Manus 管理端 REST API（`/v1/usage`）拉取聚合后的额度用量
+   ——用 `live` feature gate 起来，所以默认构建是不带 HTTP 的。
+2. 通过 `services/importer_manus/assets/price_table.toml` 这份内置
+   TOML 价格表，把厂商的**额度（credits）**换算成估算的美元
+   （整数 micro-USD，饱和乘法）。
+3. 发出带签名的 `spendguard.audit.import.manus_credit` CloudEvents，
+   打上 `reservation_source=subscription_meter`（与 D14/D16
+   同族对齐）和 `import_source=manus_team_api` 标签——落到和 D13
+   subscription-meter 行、以及姊妹 D14 Devin / D16 Genspark
+   导入器同一块 dashboard 上。
+
+默认的合并 gate 是一次**脱敏过的 fixture 回放**——也就是已提交的
+`tests/fixtures/manus_usage.json` 快照。Live 模式需要运维显式
+opt-in。
+
+## 额度 → 美元换算（三档）
+
+| 档位               | `credit_cost_micro_usd` | 审计行形态 |
+|--------------------|-------------------------|-----------------|
+| **team_plan**       | `20_526`（≈ $0.020526/credit） | $39/mo / 1900 credits，整数截断。代表性换算：47 credits × 20_526 = 964_722 micro-USD。 |
+| **enterprise**      | `0`（需要运维 override） | 按合同单独谈；override 落地前 dashboard 上 spend 显示 NULL。 |
+| **enterprise_byok** | `0`（LOAD-BEARING） | BYOK 档位的客户直接付费给 LLM 提供商。导入器**绝不能**对他们二次计费。 |
+
+换算是纯函数：整数 micro-USD 下的 `credits × credit_cost_micro_usd`，
+溢出时饱和到 `i64::MAX`。价格表的 `pricing_version` 会在换算的那一
+刻盖到每一条发出的行上——事后改回旧版费率文件**不会**重写历史
+审计行。
+
+### 为什么 `enterprise_byok = 0` 是 load-bearing 的
+
+BYOK 客户自带 LLM 提供商的 key（Anthropic / OpenAI / 等等），LLM
+账单直接由他们付。如果导入器在 Manus 这一侧*再*算他们一次，
+SpendGuard dashboard 上这笔 spend 就重复计了。价格表里那行 BYOK
+明确标注为 load-bearing——**没重读 BYOK 合同之前绝不要往上调**。
+
+## 安装
+
+### Fixture 模式（默认合并 gate）
+
+```bash
+cargo run -p spendguard-importer-manus --bin importer_manus -- \
+    --mode fixture \
+    --fixture services/importer_manus/tests/fixtures/manus_usage.json
+```
+
+这个二进制会为每个**终态（terminal）**会话各输出一条 CloudEvent 到
+stdout（进行中的会话默认过滤掉——加 `--include-in-progress`
+也能看到它们）。demo 运行脚本
+（`deploy/demo/import_manus_fixture_demo.sh`）会把 INSERT 路径
+接到一个用完即弃的 demo postgres 上。
+
+### Live 模式（运维 opt-in）
+
+```bash
+export MANUS_API_TOKEN=<Team+ admin API token>
+export MANUS_API_BASE_URL=https://api.manus.ai   # optional override
+
+cargo run -p spendguard-importer-manus --features live --bin importer_manus -- \
+    --mode live
+```
+
+`live` feature 只引入带 `rustls-tls` 的 `reqwest`（不带
+`native-tls`，不带 `openssl-sys`），每个请求 30s 超时，并用有界
+指数退避（上限 1 小时）来扛限流。游标分页硬上限是 10_000 页，
+防止行为异常的厂商 `next_cursor` 把分页无限循环下去。
+
+把 token 的权限只收敛到 **Manus Team+ admin API** 这一个 scope——
+最小权限。
+
+## 幂等性
+
+重跑同一个时间窗不会重复发事件。CloudEvent 的 `event.id` 是由
+`(workspace_id, session_id, window_end)` 推导出来的确定性 UUIDv5；
+审计行的 `dedupe_key` 是 `manus:<session_id>`（厂商隔离的命名空间，
+所以 D14 / D16 的 key 永远不会撞）；canonical_ingest 走现有的
+`event_replay_dedup` 表去重。
+
+demo 你想跑多少遍都行：
+
+```bash
+make -C deploy/demo demo-import-manus-fixture
+make -C deploy/demo demo-import-manus-fixture   # idempotent; 0 new rows
+```
+
+## CloudEvent 示例
+
+<div is:raw>
+
+```json
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.manus_credit",
+  "source": "spendguard-importer-manus",
+  "id": "018f4b15-6d61-7c15-91fe-d0156d61aca0",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/ws_FAKE_team_001/manus/workspace/ws_FAKE_team_001/session/ses_FAKE_team_completed_001",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "ws_FAKE_team_001",
+    "workspace_id": "ws_FAKE_team_001",
+    "session_id": "ses_FAKE_team_completed_001",
+    "tier": "team_plan",
+    "status": "completed",
+    "credits_consumed": 47,
+    "credit_cost_micro_usd": 20526,
+    "amount_micro_usd": 964722,
+    "pricing_version": "manus-credit-v1-2026-06",
+    "model": "manus.session/credit",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "window_start": "2026-06-05T14:00:00Z",
+    "window_end": "2026-06-05T15:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "manus_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "535d5cf688f486cac501436eb24e6357fa6c3677464001a0402e86686a50b0de",
+    "dedupe_key": "manus:ses_FAKE_team_completed_001"
+  }
+}
+```
+
+</div>
+
+## 价格表示例（TOML）
+
+<div is:raw>
+
+```toml
+pricing_version = "manus-credit-v1-2026-06"
+effective_from  = "2026-06-01T00:00:00Z"
+currency        = "USD"
+
+[tiers.team_plan]
+credit_cost_micro_usd = 20526
+# $39/mo / 1900 credits = $0.020526/credit; integer-truncated.
+
+[tiers.enterprise]
+credit_cost_micro_usd = 0
+# Operator override required at deploy time.
+
+[tiers.enterprise_byok]
+credit_cost_micro_usd = 0
+# LOAD-BEARING: BYOK customers pay LLM provider direct.
+```
+
+</div>
+
+## 为什么我们没法 gate
+
+Manus 的 agent 循环**完全跑在 Butterfly Effect 厂商托管的 VM
+里**。客户的 egress proxy 根本看不到 LLM API 调用的 payload——
+Manus VM 是从厂商自家的网络边界内侧去拨 OpenAI / Anthropic 的。
+管理端 API 只暴露事后的聚合额度用量，没有任何调用前的 hook。
+
+这就是 SpendGuard framework-coverage 分析里的 **Archetype IV**：
+一个全托管的云端 agent，客户对它的网络零可见性。唯一可行的集成
+方式就是对账——事后把账单拉过来，呈现到 dashboard 上，在跨过
+阈值时告警。除非 Manus 出一个调用前的 webhook，否则 gate 在架构
+上就是做不到的。
+
+## 你在 dashboard 上能看到什么
+
+* 每个会话、每个 workspace 的估算美元——标注了
+  `pricing_version`。
+* 消耗的额度（始终都在，连 enterprise/BYOK 那种零金额行也有）。
+* `reservation_source = subscription_meter` 这个筛选会把 Manus
+  spend 和 Devin（D14）、Genspark（D16）导入器行，以及跳过 BYOK
+  ledger 的 Claude Code Pro / Codex（D13）advisory 行归到一起。
+* 通过 `import_source = manus_team_api` 做单导入器筛选。
+* 档位级别的透视：`team_plan` vs `enterprise` vs `enterprise_byok`。
+
+## 姊妹导入器集成
+
+D15 属于一个三导入器家族，覆盖 agent 厂商的 Archetype IV 生态：
+
+* **[D14 Devin 导入器](/docs/integrations/devin-importer/)** —
+  Cognition Labs 的 ACU 用量。
+* D15 Manus 导入器（本页）。
+* D16 Genspark 导入器 — Genspark 的 `genspark_team_api` 用量。
+
+三者都遵循同一套锁定的不变式：`reservation_source =
+subscription_meter`、`import_source = <vendor>_team_api`、确定性
+UUIDv5 事件 ID、带厂商前缀的 dedupe key（`devin:` / `manus:` /
+`genspark:`）、默认构建不带 HTTP、live 模式仅 rustls 且收在
+`live` feature flag 后面。
+
+## 实现索引
+
+* Crate 脚手架 + Cargo.toml：`services/importer_manus/Cargo.toml`
+  ——排除在 workspace 之外，`publish = false`，`live` feature gate。
+* 纯换算：`services/importer_manus/src/audit.rs`
+  （`import_record_to_audit_row`）——无 I/O、不读时钟、只走整数
+  micro-USD。
+* 价格表：`services/importer_manus/src/pricing.rs` +
+  `assets/price_table.toml` ——饱和算术，拒绝负数额度。
+* CloudEvent 构建器：`services/importer_manus/src/cloudevent_envelope.rs`
+  ——通过 `tests/golden/cloudevent_v1alpha1_*.json` 做 golden 测试。
+* Fixture 加载器：`services/importer_manus/src/fixture.rs` ——
+  在解析时就硬拒绝非合成 ID（`ws_FAKE_*` / `ses_FAKE_*`）。
+* Live 客户端：`services/importer_manus/src/live/client.rs` ——
+  仅 rustls 的 `reqwest` 封装，带类型化的 401/403/429/5xx 错误，
+  以及有界的游标分页。
+* Migration：`services/ledger/migrations/0060_import_source_widen_manus.sql`
+  ——把现有 `audit_outbox.import_source` 的 CHECK 放宽到包含
+  `manus_team_api`。
+
+完整的设计推理 + slice 级拆分见
+[`docs/specs/coverage/D15_manus_importer/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D15_manus_importer/design.md)。

@@ -1,0 +1,270 @@
+---
+title: "AG-UI 花費事件(僅供顯示)"
+description: >-
+  透過 spendguard.* CUSTOM 事件家族,在任何 AG-UI 前端呈現 SpendGuard 的預算狀態、
+  reservation 生命週期與 deny 原因 —— 純 builder,放在 @spendguard/ag-ui (npm) 與
+  spendguard.integrations.ag_ui (PyPI)。僅供顯示:enforcement 仍然留在 SpendGuard
+  的 adapter 與 sidecar。
+---
+
+> **僅供顯示。** AG-UI 事件只是一個呈現面(presentation surface)。SpendGuard 真正的
+> enforcement 是在 SpendGuard 的 adapter 與 sidecar、在打 provider 之前就做掉;這些
+> 事件只是回報「已經做完的決策」,既不能放行也不能擋下任何花費。
+
+[AG-UI](https://github.com/ag-ui-protocol/ag-ui) 是 agent 後端跟它前端之間、以事件為基礎
+的協定,在 LangGraph、CrewAI、Microsoft Agent Framework、Google ADK、AWS Strands、
+Mastra、Pydantic AI、Agno、LlamaIndex、AG2 都有第一方整合。有 SpendGuard 把關的
+agent 會在 sidecar 端執行 enforcement —— 但在這之前,盯著前端的人其實什麼都看不到:擋下
+一個 call 時,畫面上只會冒出一個語焉不詳的 agent error。
+
+`spendguard.*` 這組事件家族就是要補上這個呈現上的缺口。它搭的是 AG-UI 官方認可的擴充欄位
+(`CUSTOM` 事件:`name` + `value`),而且只要概念上有重疊的地方,就原封不動沿用
+[ASP Draft-01](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/agent-spend-protocol/draft-01.md)
+的欄位詞彙。
+
+```text
+            (enforcement plane — unchanged)
+agent code ──► SpendGuard adapter ──► sidecar UDS gRPC ──► ledger + audit chain
+                    │
+                    │  DecisionOutcome / CommitEstimated ack / DecisionDenied err
+                    ▼
+            (presentation plane — this page)
+            build*() pure builders ──► AG-UI CUSTOM event objects
+                    │
+                    ├──► encodeSse(event) ──► SSE frame ──► AG-UI frontend
+                    └──► any AgUiEmit transport the host app already has
+```
+
+這些事件是**沒有簽章的 UI 提示(unsigned UI hints)**。它們不是 SpendGuard 的 audit
+chain,也絕對不可以當成稽核紀錄來用 —— 有簽章的 audit chain 是放在 sidecar/ledger 裡。
+
+## 安裝
+
+```bash
+npm install @spendguard/ag-ui          # TypeScript / JavaScript
+pip install spendguard-sdk             # Python — spendguard.integrations.ag_ui
+```
+
+兩個套件都是**零執行期相依(zero runtime dependencies)**,而且執行期完全不會 import
+任何 AG-UI 函式庫。`@ag-ui/core` 在 TS 端是 optional peer;`spendguard-sdk[ag-ui]`
+這個 extra 只會幫那些想用其 pydantic model 來驗證事件的人拉進 `ag-ui-protocol`。
+
+## 五個事件
+
+| Builder (TS / Python) | AG-UI CUSTOM `name` | 何時發出 |
+|---|---|---|
+| `buildBudgetSnapshot` / `build_budget_snapshot` | `spendguard.budget.snapshot` | host app 想要呈現當下的預算狀態(run 開始、定期刷新) |
+| `buildReservationCreated` / `build_reservation_created` | `spendguard.reservation.created` | sidecar `reserve` 回了 ALLOW / ALLOW_WITH_CAPS(SpendGuard 的 `CONTINUE` / `DEGRADE`) |
+| `buildReservationCommitted` / `build_reservation_committed` | `spendguard.reservation.committed` | `commitEstimated` 被 ack 了 |
+| `buildReservationReleased` / `build_reservation_released` | `spendguard.reservation.released` | `release` 被 ack 了(abort / timeout / cancel 這條路徑) |
+| `buildDecisionDenied` / `build_decision_denied` | `spendguard.decision.denied` | sidecar 在 dispatch 之前就擋下這個 call(任何 deny-class 的結果) |
+
+每一個 payload 都帶著 `schema_version: "1"`。每個事件給一個範例:
+
+### `spendguard.budget.snapshot`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.budget.snapshot",
+  "value": {
+    "schema_version": "1",
+    "budget_id": "44444444-4444-4444-8444-444444444444",
+    "window_instance_id": "55555555-5555-4555-8555-555555555555",
+    "unit": "usd_micros",
+    "unit_id": "66666666-6666-4666-8666-666666666666",
+    "remaining_atomic": "500",
+    "reserved_atomic": "0",
+    "spent_atomic": "0",
+    "as_of": "2026-06-10T07:59:58Z"
+  }
+}
+```
+
+</div>
+
+### `spendguard.reservation.created`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.reservation.created",
+  "value": {
+    "schema_version": "1",
+    "decision_id": "018f4a3a-d971-7c14-91fe-d014de71aca0",
+    "reservation_id": "018f4a3a-e2b0-7d21-8a44-2c9f51c0be11",
+    "budget_id": "44444444-4444-4444-8444-444444444444",
+    "window_instance_id": "55555555-5555-4555-8555-555555555555",
+    "unit": "usd_micros",
+    "unit_id": "66666666-6666-4666-8666-666666666666",
+    "amount_atomic_reserved": "5000",
+    "decision": "ALLOW",
+    "ttl_expires_at": "2026-06-10T08:09:58Z",
+    "run_id": "018f4a3a-d100-7aaa-8bbb-0123456789ab",
+    "llm_call_id": "018f4a3a-d200-7ccc-8ddd-0123456789ab",
+    "event_time": "2026-06-10T07:59:58Z"
+  }
+}
+```
+
+</div>
+
+### `spendguard.reservation.committed`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.reservation.committed",
+  "value": {
+    "schema_version": "1",
+    "decision_id": "018f4a3a-d971-7c14-91fe-d014de71aca0",
+    "reservation_id": "018f4a3a-e2b0-7d21-8a44-2c9f51c0be11",
+    "budget_id": "44444444-4444-4444-8444-444444444444",
+    "window_instance_id": "55555555-5555-4555-8555-555555555555",
+    "unit": "usd_micros",
+    "unit_id": "66666666-6666-4666-8666-666666666666",
+    "amount_atomic_estimated": "5000",
+    "outcome": "SUCCESS",
+    "event_time": "2026-06-10T08:00:01Z"
+  }
+}
+```
+
+</div>
+
+`amount_atomic_estimated` 是 SpendGuard 相對於 ASP 一個有寫進文件的 delta:SpendGuard
+今天的 commit 這條路走的是 `CommitEstimated`,而這個欄位特意取了跟 ASP 的
+`amount_atomic_observed` 不一樣的名字,免得有 consumer 把它誤認成 provider 回報的實際用量。
+
+### `spendguard.reservation.released`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.reservation.released",
+  "value": {
+    "schema_version": "1",
+    "reservation_id": "018f4a3a-e2b0-7d21-8a44-2c9f51c0be11",
+    "reason_codes": ["client_timeout"],
+    "ledger_transaction_id": "018f4a3a-f000-7eee-8fff-0123456789ab",
+    "event_time": "2026-06-10T08:00:31Z"
+  }
+}
+```
+
+</div>
+
+### `spendguard.decision.denied`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.decision.denied",
+  "value": {
+    "schema_version": "1",
+    "decision_id": "018f4a3b-0a00-7111-8222-0123456789ab",
+    "decision": "DENY",
+    "denied_kind": "STOP",
+    "reason_codes": ["BUDGET_EXHAUSTED"],
+    "budget_id": "44444444-4444-4444-8444-444444444444",
+    "unit": "usd_micros",
+    "event_time": "2026-06-10T08:00:05Z"
+  }
+}
+```
+
+</div>
+
+`decision` 永遠是 ASP 的字面值 `"DENY"`;真正比較細的 SpendGuard 分類則放在
+`denied_kind`(`DENY` / `STOP` / `STOP_RUN_PROJECTION` / `SKIP` /
+`APPROVAL_REQUIRED`)。
+
+## TypeScript 快速上手
+
+```ts
+import { buildReservationCreated, encodeSse } from "@spendguard/ag-ui";
+
+// `outcome` is the DecisionOutcome your SpendGuard adapter already got back
+// from `client.reserve(...)` — the builders never mint IDs, never read
+// clocks, never touch the network.
+const event = buildReservationCreated(
+  {
+    decisionId: outcome.decisionId,
+    reservationId: outcome.reservationIds[0]!,
+    budgetId,
+    windowInstanceId,
+    unit: "usd_micros",
+    unitId,
+    amountAtomicReserved: "5000",
+    decision: outcome.decision === "DEGRADE" ? "ALLOW_WITH_CAPS" : "ALLOW",
+    ttlExpiresAt: new Date(outcome.ttlExpiresAtSeconds * 1000).toISOString(),
+    eventTime: new Date().toISOString(),
+  },
+  { timestampMs: Date.now() },
+);
+
+const frame = encodeSse(event); // "data: {...canonical JSON...}\n\n"
+```
+
+## Python 快速上手
+
+```python
+from spendguard.integrations.ag_ui import (
+    ReservationCreatedInput, build_reservation_created, encode_sse,
+)
+
+evt = build_reservation_created(ReservationCreatedInput(
+    decision_id=outcome.decision_id,
+    reservation_id=outcome.reservation_ids[0],
+    budget_id=budget_id, window_instance_id=window_instance_id,
+    unit="usd_micros", unit_id=unit_id,
+    amount_atomic_reserved="5000",
+    decision="ALLOW", ttl_expires_at="2026-06-10T08:00:00Z",
+    event_time="2026-06-10T07:59:58Z",
+))
+sse_frame = encode_sse(evt)   # hand to your AG-UI transport
+```
+
+只要輸入一樣,TS 跟 Python 的 canonical 序列化結果是**byte-identical(逐位元組相同)**——
+這點已經拿共用的 frozen fixture corpus `sdk/fixtures/cross-language/ag_ui_v1.json`
+驗過。
+
+## ASP Draft-01 對應
+
+只要概念上有重疊的地方,payload 的 key 就原封不動沿用 ASP Draft-01 的詞彙
+(`budget_id`、`window_instance_id`、`unit`、`*_atomic` 十進位字串、`decision_id`、
+`reservation_id`、`reason_codes`、`event_time`、`ttl_expires_at`,以及
+`ALLOW`/`ALLOW_WITH_CAPS`/`DENY` 這組 decision enum)。完整的對應表放在 locked 的 spec 裡:
+[`docs/specs/coverage/D39_ag_ui/design.md` §5.8](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D39_ag_ui/design.md)。
+
+## 跑 demo
+
+```bash
+make demo-up DEMO_MODE=ag_ui_events && make demo-verify-ag-ui-events
+```
+
+一個 Node runner 會去驅動一段「真的」sidecar run(handshake → budget snapshot →
+對一個會計數的 provider stub 做 ALLOW 的 reserve/commit → 再做一個會超過 cap 的
+reserve、由 **sidecar** 在 dispatch 之前擋掉),然後把錄下來的 `spendguard.*` frame
+透過 SSE 重播一遍。verify gate 會去斷言:剛好那 4 個 frame 的順序、canonical 的位元組,
+還有事件串流裡的 `reservation_id` 確實存在於真實的 ledger 裡 —— 也就是說,顯示用的事件
+是貨真價實地在描述真實的 ledger 狀態。runner 同時也證明了:在被擋掉的那個 call 上,provider
+stub 的 hit counter 完全沒動 —— enforcement 是在 sidecar 端發生的;AG-UI 事件只是把它
+回報出來而已。
+
+## 0.x 變動須知
+
+AG-UI 整個都還在 0.x(出版本很快,也沒有 spec 穩定性的政策)。SpendGuard 的套件自己掌握
+自己的事件型別 —— 在結構上對齊 AG-UI 的 `CUSTOM` 外形,並在 CI 裡針對精確 pin 住的
+AG-UI 版本做相容性測試。就算哪天 AG-UI 出新版動了東西,SpendGuard 的 wire shape 也不會跟著
+變:consumer 一律以每個 payload 裡的 `schema_version` 為準。

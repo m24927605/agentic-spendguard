@@ -1,0 +1,128 @@
+---
+title: "Botpress 集成 SDK — @spendguard/botpress-integration"
+description: >-
+  把 Agentic SpendGuard 作为一等公民的 Botpress 集成接入。
+  `beforeAiGeneration` hook 在 Botpress 发出上游模型 HTTP 之前预留
+  budget；`afterAiGeneration` hook 在调用结束时按真实用量提交。遇到
+  DENY / DEGRADE / 配置错误时抛出 Botpress RuntimeError；默认 fail-closed。
+---
+
+
+> [Botpress](https://botpress.com/) 提供一套 Integration SDK，带有
+> `beforeAiGeneration` / `afterAiGeneration` 两个 hook，runtime 会在每次
+> 模型调用前后各 fire 一次。SpendGuard 以
+> `@spendguard/botpress-integration` 的形式发布 —— 在自托管的
+> Botpress v12 上通过 `botpress integrations push` 安装（Botpress Cloud
+> 则走 marketplace，目前待审核）。这个集成在调用前先向 SpendGuard
+> sidecar HTTP companion 预留花销，把上游 HTTP 交给 Botpress 自己发，
+> 调用结束后再从 `event.payload.usage` 提交真实用量。默认 fail-closed：
+> 一旦拿到 DENY 或 DEGRADE 判定就抛出 Botpress `RuntimeError`，并带上
+> 一个稳定的 `code` 字段，让对话能确定性地把 budget 信号暴露出来。
+
+## 为什么给 Botpress 配 SpendGuard
+
+Botpress 的 hook 面是整个 Category D 插件生态里最干净的模型调用前/后
+扩展点。今天一个 bot 调 OpenAI / Anthropic / Bedrock，没有任何调用前的
+美元闸门，没有预留，也没有签名审计。SpendGuard 集成接上去之后：
+
+- 在 Botpress 发出上游 HTTP **之前**，按运维配置的 budget 预留预估
+  花销。DENY 直接跳过上游 —— 对话暴露 `BUDGET_DENIED`，provider 端
+  一个 token 都不会计费。
+- 在 hook 结束时，从上游用量帧里提交真实的
+  `inputTokens + outputTokens`。如果拿不到 usage，就回退到 estimator
+  snapshot 并打一条 WARN。
+- 在集成 **register** 阶段，通过一次 1-token 的 reserve+release 探测
+  （`validateConfiguration`）抓出 sidecar 的配置错误，这样运维在保存
+  集成表单时就能看到 SpendGuard 接线错误，而不是等到第一条对话消息。
+
+## 安装（自托管 Botpress v12）
+
+```bash
+# 1. Install the integration package + peer deps.
+pnpm add @spendguard/botpress-integration @spendguard/sdk @botpress/sdk
+
+# 2. Push the integration to your Botpress v12 server.
+botpress integrations push
+```
+
+然后在 Botpress Studio UI 里打开该集成的配置表单，填写：
+
+- `sidecarUrl` —— SpendGuard sidecar HTTP companion 的 URL（在
+  sibling-pod / sibling-container 拓扑下一般是
+  `http://sidecar:8443`）。
+- `spendguardBudgetId` —— 要计费的 SpendGuard budget 的 UUID。
+- `spendguardWindowInstanceId` —— 当前活跃 window instance 的 UUID。
+- `upstreamProvider` —— `openai`、`anthropic`、`bedrock` 三选一。
+- `tenantId` —— 运维侧的 tenant 标识。
+- 可选的 `tlsCertPath` / `tlsKeyPath` / `tlsRootCaPath` —— 当 sidecar
+  强制 client-cert 认证时的 mTLS 材料路径。
+
+保存表单会触发 `register` 生命周期，它会向 sidecar 发一次 1-token 的
+reserve+release 探测。保存成功就说明 SpendGuard 接线端到端打通了；
+保存失败则直接在表单里把 error code 暴露出来。
+
+## 安装（Botpress Cloud）
+
+Marketplace push（`botpress integrations push --marketplace`）目前待
+审核；通过 `botpress integrations push` 做 sideload 才是 v1 的不变式，
+而且走 SDK 上传路径在 Cloud 上也能用。
+
+## 行为矩阵
+
+| 路径                                       | 发生了什么                                                                                                                |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| Sidecar **ALLOW**                          | `beforeAiGeneration` 返回 `{ data }`；Botpress 发出上游；`afterAiGeneration` 提交真实的 `inputTokens+outputTokens`。 |
+| Sidecar **DENY**                           | `beforeAiGeneration` 抛出 `RuntimeError("BUDGET_DENIED")`。**不发上游 HTTP。** reason code 通过 error message 传出。 |
+| Sidecar **DEGRADE**（默认 fail-closed）    | `beforeAiGeneration` 抛出 `RuntimeError("BUDGET_DEGRADED")`。                                                               |
+| Sidecar DEGRADE + `SPENDGUARD_BOTPRESS_FAIL_OPEN=1` | `beforeAiGeneration` 返回一个 sentinel handle；`afterAiGeneration` 在 commit 上做 no-op；打 WARN。仅限开发临时逃生。    |
+| `event.payload.usage` 存在                 | commit 提交 `actual_amount_atomic = inputTokens + outputTokens`。INV-5 主路径。                                            |
+| `event.payload.usage` 缺失                 | commit 提交 estimator-snapshot 的金额；WARN 日志里带有子串 `falling back to estimator`。INV-5 次路径。    |
+| 对话在生成中途被取消                       | `afterAiGeneration` 以 `outcome=REJECTED` 释放预留，并记录 CANCELLED 分类。            |
+
+## 与 egress proxy 的取舍矩阵
+
+你也可以在网络层用 SpendGuard egress proxy 给 Botpress 花销设闸
+（设 `OPENAI_BASE_URL=http://egress-proxy:9000/v1`）。两条路径打到的是
+同一条审计链；按拓扑来选：
+
+| 什么场景                                                                                                | 路径                              |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------- |
+| 你自己持有 Botpress runtime，并且想在 Studio UI 里有一个一等公民的集成入口。                           | `@spendguard/botpress-integration` |
+| Botpress 是托管的 Cloud workload，你想零插件安装、零 Studio 侧配置。                                   | Egress proxy `OPENAI_BASE_URL`     |
+| 你需要在审计链里带上对话级元数据（`bot_id`、`conversation_id`、`user_id`）。                            | `@spendguard/botpress-integration` |
+| 你想用一份配置盖住 Botpress 以及所有拨同一个 provider URL 的 tenant 工具。                              | Egress proxy                       |
+
+## 局限
+
+- **AI hook 之外不做 workflow-node 级别的 gating。** 这个集成只覆盖
+  `beforeAiGeneration` / `afterAiGeneration`；RAG、tool-call、
+  knowledge-base 节点在 v1 范围之外。
+- **没有逐 token 的流式中途封顶。** 只在 hook 结束时 commit。sidecar
+  仍然可以在调用前下硬上限；要做流式中途打断，就得有 Botpress 没给的
+  hook。
+- **不覆盖 Botpress channel 插件。** WhatsApp / Slack / Web Chat 这些
+  channel 跟它正交 —— 不管走哪个 channel，集成拦到的每一次模型调用
+  SpendGuard 都看得到。
+- **只支持 `@botpress/sdk` 0.7。** 通过 `peerDependencies` 钉死在
+  `>=0.7.0 <0.8.0`。0.8.x 是后续 follow-up；0.6 压根没有 AI generation
+  这套 hook。
+- **只支持 Botpress v12。** v11 的 hook 面不一样，集成根本加载不了。
+- **Strategy C 延后。** per-conversation 的客户插件契约要等 v1.1。
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=botpress_real
+```
+
+拉起 SpendGuard 基础栈（postgres / ledger / sidecar /
+canonical-ingest / outbox-forwarder），外加一个 in-network 计数 stub
+和一个 Node 20 runner，按 3 步矩阵（ALLOW + DENY + STREAM）跑一遍集成的
+reserve / commit / release 生命周期。这个矩阵在 SpendGuard ledger 层
+验证 INV-1（DENY 跳过上游）和 INV-5（按真实用量 commit）。
+
+## 源码
+
+- 集成包：`integrations/botpress/`
+- Demo overlay：`deploy/demo/botpress_real/`
+- 规格：`docs/specs/coverage/D32_botpress/`
