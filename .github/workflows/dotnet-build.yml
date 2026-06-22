@@ -13,6 +13,10 @@ on:
       - 'proto/**'
       - '.github/workflows/dotnet-build.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: build + test (.NET 8)

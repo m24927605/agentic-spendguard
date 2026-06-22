@@ -21,12 +21,17 @@ on:
     types: [published]
   workflow_dispatch:  # allow manual trigger for re-publish testing
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     # Only fire for langflow-component-v* tags. Other release tags
     # (e.g. sdk-v* / helm-chart-v*) are ignored.
     if: startsWith(github.ref, 'refs/tags/langflow-component-v')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment:
       name: pypi
       url: https://pypi.org/project/spendguard-langflow-component/${{ github.ref_name }}

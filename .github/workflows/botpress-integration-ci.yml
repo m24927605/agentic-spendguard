@@ -38,6 +38,10 @@ on:
       - "integrations/botpress/**"
       - ".github/workflows/botpress-integration-ci.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit-tier:
     runs-on: ubuntu-latest

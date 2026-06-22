@@ -33,6 +33,10 @@ on:
     types: [published]
   workflow_dispatch:  # allow manual trigger for re-publish testing
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     # Only fire for vercel-ai-v* tags. Other release tags
@@ -40,6 +44,7 @@ jobs:
     # so each package's release cadence stays independent.
     if: startsWith(github.ref, 'refs/tags/vercel-ai-v')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment:
       name: npm
       url: https://www.npmjs.com/package/@spendguard/vercel-ai/v/${{ github.ref_name }}
