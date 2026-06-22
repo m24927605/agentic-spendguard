@@ -27,6 +27,15 @@
 name: spendguard-demo
 
 services:
+  # ── sidecar peer-uid override ─────────────────────────────────────────
+  # The runner connects to the adapter UDS as root (uid 0) to write its
+  # named-volume venv; the sidecar SO_PEERCRED gate defaults to its own uid
+  # (65532) and would reject root ("Socket closed"). Accept root for this
+  # local-UDS demo (production uses mTLS+SPIFFE, never this path). Matches
+  # the override every other root-runner overlay already carries.
+  sidecar:
+    environment:
+      SPENDGUARD_SIDECAR_ADAPTER_EXPECTED_PEER_UID: "0"
   # ── counting-stub ────────────────────────────────────────────────────
   counting-stub:
     image: python:3.12-slim
