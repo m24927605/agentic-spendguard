@@ -77,8 +77,13 @@ BEGIN
     -- bleed-through from the base compose seed.
     --
     -- INV-1 / INV-2 evidence: reserve + commit gates are HARD (HARDEN_D05_UR closed).
-    -- denied_decision is optional — the DENY substep may produce it depending
-    -- on the sidecar contract evaluator's audit-write semantics.
+    -- The live driver enforces the real DENY at the litellm-shim layer (dspy
+    -- 3.x swallows callback exceptions, so the dspy callback cannot fail-closed
+    -- — see project_deny_conformance_marathon). The DENY is proven RUNNER-side
+    -- (counting-stub unchanged + a SpendGuard fail-closed exception), same as
+    -- COV_D12 litellm_sdk_deny: a budget-floor STOP has no matched contract
+    -- rule so the sidecar does NOT persist a denied_decision row. denied_decision
+    -- is therefore informational here, not a hard gate.
     IF v_reserve < 1 THEN
         RAISE EXCEPTION 'COV_D21_GATE: ledger_transactions.reserve >= 1 expected (ALLOW), got %', v_reserve;
     END IF;
@@ -86,7 +91,7 @@ BEGIN
         RAISE EXCEPTION 'COV_D21_GATE: ledger_transactions.commit_estimated >= 1 expected (ALLOW), got %', v_commit;
     END IF;
     IF v_denied < 1 THEN
-        RAISE NOTICE 'COV_D21 NOTE: ledger_transactions.denied_decision >= 1 expected (DENY), got %; this is acceptable when sidecar contract did not enforce the synthetic huge-claim cap', v_denied;
+        RAISE NOTICE 'COV_D21 NOTE: denied_decision=% (DENY is enforced + proven runner-side via zero-provider-HTTP; budget-floor STOP is not persisted as a contract-ruleless denied_decision)', v_denied;
     END IF;
 
     RAISE NOTICE 'COV_D21 LEDGER OK: reserve=% commit=% denied=%',

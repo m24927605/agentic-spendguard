@@ -4930,37 +4930,41 @@ async def run_strands_deny_mode() -> int:
 
 
 async def run_dspy_real_mode() -> int:
-    """Run a DSPy Predict/ChainOfThought end-to-end with SpendGuard PRE/POST.
+    """Run a REAL DSPy ChainOfThought end-to-end, ENFORCED by the SpendGuard
+    litellm SDK shim (NOT the dspy callback).
 
-    Three substeps:
-      * Step 1 ALLOW  — ``dspy.Predict("question -> answer")`` fires one
-        LM call against the counting-stub; reserve fires BEFORE the
-        provider HTTP; commit fires after with real usage.
-      * Step 2 DENY   — resolver injection mints a huge claim so the
-        sidecar emits STOP; ``DecisionDenied`` propagates BEFORE the LM
-        dispatches; counting-stub records ZERO new hits on this turn.
-      * Step 3 CUSTOM-LM — an inline custom ``dspy.LM`` subclass with a
-        ``custom-bypass`` model string hits the counting-stub directly
-        (bypassing LiteLLM); proves direct-path coverage independent of
-        D12.
+    dspy 3.x SWALLOWS callback exceptions, so SpendGuardDSPyCallback can only
+    AUDIT, never BLOCK (proven 2026-06-22). dspy.LM routes 100% of LM calls
+    through litellm, so we gate at the litellm layer where the exception
+    propagates out of qa(): install the litellm SDK shim (fail_open=False),
+    which raises DecisionDenied from INSIDE litellm.completion BEFORE the
+    provider HTTP — dspy cannot swallow a call exception.
 
-    Falls back to a duck-typed driver path when ``dspy-ai`` is not
-    importable in the demo container (CI smoke path).
+    Two turns (no fakes, no manual ledger emits, no MagicMock):
+      * ALLOW — dspy.LM(max_tokens=16) => shim claims a small amount (under the
+        seeded budget) => sidecar ALLOW; the real ChainOfThought reaches the
+        counting-stub (counter +1) and the shim commits.
+      * DENY  — reinstall the shim against a NON-EXISTENT budget (the proven
+        COV_D12 litellm_sdk_deny mechanism) => the sidecar STOPs the reserve at
+        the budget floor BEFORE litellm's provider HTTP => the shim raises a
+        fail-closed SpendGuard exception; the counting-stub is UNCHANGED.
+
+    dspy is driven via the ASYNC path (qa.acall => litellm.acompletion) on
+    run_demo's main loop, so the shim's acompletion patch + the grpc client
+    share that loop (the SYNC path would force the shim onto an asyncio.run
+    fresh loop the main-loop-bound channel cannot use).
     """
-    from types import SimpleNamespace
-
-    from spendguard import SpendGuardClient, new_uuid7
-    from spendguard._proto.spendguard.common.v1 import common_pb2
+    from spendguard import SpendGuardClient
+    from spendguard.errors import DecisionDenied
+    from spendguard.integrations.litellm_sdk_shim import (
+        SpendGuardShimOptions,
+        install_shim,
+        uninstall_shim,
+    )
 
     socket_path = _env("SPENDGUARD_SIDECAR_UDS")
     tenant_id = _env("SPENDGUARD_TENANT_ID")
     budget_id = _env("SPENDGUARD_BUDGET_ID")
-    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
-    unit_id = _env("SPENDGUARD_UNIT_ID")
-    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
-    fx = _env("SPENDGUARD_FX_RATE_VERSION")
-    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
-    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
     stub_url = os.environ.get(
         "SPENDGUARD_COUNTING_STUB_URL", "http://counting-stub:8765"
     )
@@ -4984,332 +4988,171 @@ async def run_dspy_real_mode() -> int:
         return 3
     print(f"[demo] handshake ok session_id={client.session_id}")
 
-    unit = common_pb2.UnitRef(
-        unit_id=unit_id,
-        token_kind="output_token",
-        model_family="gpt-4",
-    )
-    pricing = common_pb2.PricingFreeze(
-        pricing_version=pricing_version,
-        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
-        fx_rate_version=fx,
-        unit_conversion_version=unit_conv,
-    )
-
-    # Load the dspy integration via package-namespace bypass — the demo
-    # container may or may not have dspy-ai installed; the in-tree
-    # spendguard.integrations.dspy package barrel raises ImportError
-    # when the extra is missing. We load the _wrapper + _options
-    # modules directly so the smoke path still works.
-    import importlib
-    import types as _t
-    from pathlib import Path as _P
-
-    pkg_name = "spendguard.integrations.dspy"
-    if pkg_name not in sys.modules:
-        ns = _t.ModuleType(pkg_name)
-        sdk_root = _P("/opt/spendguard/sdk/python/src/spendguard/integrations/dspy")
-        if not sdk_root.exists():
-            sdk_root = _P(__file__).resolve().parents[3] / \
-                "sdk/python/src/spendguard/integrations/dspy"
-        ns.__path__ = [str(sdk_root)]
-        sys.modules[pkg_name] = ns
-    wrapper_mod = importlib.import_module(
-        "spendguard.integrations.dspy._wrapper"
-    )
-    options_mod = importlib.import_module(
-        "spendguard.integrations.dspy._options"
-    )
-    SpendGuardDSPyCallback = wrapper_mod.SpendGuardDSPyCallback
-    BudgetBinding = options_mod.BudgetBinding
-    from spendguard.errors import DecisionDenied
-
-    def resolve(model_str: str):
-        return BudgetBinding(
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-        )
-
-    def estimate_small(_inputs):
-        return [
-            common_pb2.BudgetClaim(
-                budget_id=budget_id,
-                unit=unit,
-                amount_atomic="500",
-                direction=common_pb2.BudgetClaim.DEBIT,
-                window_instance_id=window_id,
-            )
-        ]
-
-    def reconcile(outputs):
-        first = outputs[0] if isinstance(outputs, list) and outputs else outputs
-        usage = getattr(first, "usage", None) or {}
-        if not isinstance(usage, dict):
-            usage = {}
-        amount = int(usage.get("total_tokens") or 0)
-        if amount <= 0:
-            inp = int(usage.get("prompt_tokens") or 0)
-            out = int(usage.get("completion_tokens") or 0)
-            amount = inp + out
-        return [
-            common_pb2.BudgetClaim(
-                budget_id=budget_id,
-                unit=unit,
-                amount_atomic=str(amount or 100),
-                direction=common_pb2.BudgetClaim.DEBIT,
-                window_instance_id=window_id,
-            )
-        ]
-
-    callback = SpendGuardDSPyCallback(
+    # The shim builds its BudgetBinding from the SPENDGUARD_* env already
+    # exported by the bundles runtime.env. fail_open=False => fail-CLOSED.
+    install_shim(SpendGuardShimOptions(
         client=client,
-        budget_resolver=resolve,
-        claim_estimator=estimate_small,
-        claim_reconciler=reconcile,
-    )
+        tenant_id=tenant_id,
+        budget_id=budget_id,
+        fail_open=False,
+    ))
 
-    run_id = str(new_uuid7())
-    print(f"[demo] dspy run_id={run_id}")
-
-    # ── Step 1: ALLOW path via dspy.ChainOfThought or duck-typed fallback ──
-    real_dspy_used = False
     try:
         import dspy  # type: ignore[import-not-found]
-
-        dspy.configure(
-            lm=dspy.LM("openai/gpt-4o-mini", api_base=f"{stub_url}/v1"),
-            callbacks=[callback],  # MUST be FIRST
-        )
-        qa = dspy.ChainOfThought("question -> answer")
-        result = qa(question="What is 2+2?")
-        answer = getattr(result, "answer", None)
-        print(
-            "[demo] step 1 ALLOW: dspy.ChainOfThought returned "
-            f"answer={answer!r}"
-        )
-        if not answer:
-            print(
-                "[demo] WARN: step 1 ALLOW result.answer empty; "
-                "stub may have returned a malformed payload but "
-                "the SpendGuard reserve+commit still landed."
-            )
-        real_dspy_used = True
     except ImportError as exc:
+        # No fabrication: the agent_real_dspy runner ships dspy-ai.
         print(
-            f"[demo] dspy not importable ({exc}); using duck-typed "
-            "driver path (CI smoke gate).",
+            f"[demo] FATAL: dspy not importable in the dspy runner ({exc}); "
+            "refusing to fake a pass.",
             file=sys.stderr,
         )
-    except Exception as exc:  # noqa: BLE001
+        uninstall_shim()
+        await client.close()
+        return 8
+
+    from spendguard.errors import SpendGuardError as _SGErr
+
+    def _is_deny(exc: BaseException) -> bool:
+        # The shim raises a real spendguard.errors fail-closed exception
+        # (DecisionDenied for a contract STOP, or SidecarUnavailable/
+        # SpendGuardError for a budget-floor STOP the sidecar can't record as a
+        # contract-ruleless DENY). dspy/litellm may wrap it — walk the
+        # __cause__/__context__ chain with a strict isinstance check (no
+        # class-name heuristic — avoids false positives like a framework
+        # "UserDenied"). The healthy ALLOW positive control rules out a genuine
+        # outage.
+        seen: set[int] = set()
+        cur: BaseException | None = exc
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            if isinstance(cur, (DecisionDenied, _SGErr)):
+                return True
+            cur = cur.__cause__ or cur.__context__
+        return False
+
+    # ── ALLOW turn ──────────────────────────────────────────────────
+    # No max_tokens => shim claims input + ~4K family default << 1B cap.
+    # dspy uses SYNC litellm.completion → run in a worker thread so the
+    # shim's _refuse_if_loop_running guard passes (no running loop).
+    # max_tokens=16 keeps the shim's claim small (input + 16) — well under the
+    # seeded budget — so the sidecar ALLOWs. (With NO max_tokens the shim's
+    # default output estimate for the unknown model 'openai/gpt-4o-mini' is
+    # large enough to exhaust the budget → a balance DENY, not what we want
+    # for the positive control.)
+    dspy.configure(
+        lm=dspy.LM(
+            "openai/gpt-4o-mini",
+            api_base=f"{stub_url}/v1",
+            api_key=os.environ.get("OPENAI_API_KEY", "sk-spendguard-demo-stub"),
+            max_tokens=16,
+        ),
+    )
+    qa = dspy.ChainOfThought("question -> answer")
+
+    # Drive dspy via the ASYNC path (qa.acall → litellm.acompletion) on
+    # run_demo's main loop: the shim's acompletion patch + the grpc client are
+    # both bound to THIS loop, so request_decision runs cross-loop-free. (The
+    # SYNC path forces the shim into asyncio.run on a fresh loop, which a
+    # main-loop-connected client channel cannot be used on.)
+    pre = _read_counting_stub_hits_sync()
+    answer = None
+    try:
+        result = await qa.acall(question="What is 2+2?")
+        answer = getattr(result, "answer", None)
+    except DecisionDenied:
+        raise  # an ALLOW claim must never deny
+    except Exception as parse_exc:  # noqa: BLE001 — dspy output-parse, post-gate
+        answer = f"<unparsed: {type(parse_exc).__name__}>"
+    post = _read_counting_stub_hits_sync()
+    if post <= pre:
         print(
-            f"[demo] dspy ChainOfThought raised "
-            f"{type(exc).__name__}: {exc}; falling back to duck-typed path.",
+            f"[demo] FATAL: dspy ALLOW did not reach provider "
+            f"(counting-stub {pre} -> {post})",
             file=sys.stderr,
         )
-
-    # ── Demo lifecycle pattern (design.md §5 + acceptance.md §3) ────
-    # SpendGuardDSPyCallback's sync hooks call ``asyncio.run`` for the
-    # sidecar dispatch; we cannot invoke them from this async demo
-    # driver because grpc-aio detects the cross-loop mismatch (one of
-    # the spec's locked design decisions — operators run dspy calls
-    # from a sync entrypoint). For the demo we therefore exercise the
-    # PRE/POST lifecycle directly through ``client.request_decision``
-    # + ``client.emit_llm_call_post`` with the SAME ``integration=dspy``
-    # decision context the callback would set, so the SQL verify step
-    # sees the right rows. We additionally call the callback's
-    # *structural* surface (signature + estimator + stash lifecycle)
-    # against an in-process fake client so the demo proves the
-    # callback's contract end-to-end without crossing the asyncio
-    # loop boundary.
-    from spendguard.ids import (
-        derive_idempotency_key,
-        derive_uuid_from_signature,
-    )
-
-    async def emit_dspy_lifecycle(
-        *,
-        substep: str,
-        model_str: str,
-        prompt_text: str,
-        amount: int,
-        expect_deny: bool = False,
-    ) -> tuple[bool, str]:
-        """Emit one PRE+POST pair tagged ``integration=dspy``.
-
-        Returns ``(deny_raised, decision_id)``.
-        """
-        sig = wrapper_mod._signature_from_inputs(
-            {"messages": [{"role": "user", "content": prompt_text}]}
-        )
-        llm_call_id = str(derive_uuid_from_signature(sig, scope="llm_call_id"))
-        decision_id = str(derive_uuid_from_signature(sig, scope="decision_id"))
-        step_id = f"dspy:{substep}-{run_id[:12]}"
-        idem = derive_idempotency_key(
-            tenant_id=client.tenant_id,
-            session_id=client.session_id,
-            run_id=run_id,
-            step_id=step_id,
-            llm_call_id=llm_call_id,
-            trigger="LLM_CALL_PRE",
-        )
-        projected = [
-            common_pb2.BudgetClaim(
-                budget_id=budget_id,
-                unit=unit,
-                amount_atomic=str(amount),
-                direction=common_pb2.BudgetClaim.DEBIT,
-                window_instance_id=window_id,
-            )
-        ]
-        from spendguard.errors import SpendGuardError as _SGE
-
-        try:
-            outcome = await client.request_decision(
-                trigger="LLM_CALL_PRE",
-                run_id=run_id,
-                step_id=step_id,
-                llm_call_id=llm_call_id,
-                tool_call_id="",
-                decision_id=decision_id,
-                route="llm.call",
-                projected_claims=projected,
-                idempotency_key=idem,
-                projected_unit=unit,
-                decision_context_json={
-                    "integration": "dspy",
-                    "lm_model": model_str,
-                    "substep": substep,
-                },
-            )
-        except DecisionDenied:
-            return (True, decision_id)
-        if expect_deny:
-            return (False, decision_id)
-        # POST commit with the simulated usage. Pre-existing demo
-        # infra has a known pricing-freeze fields mismatch issue
-        # tracked under the D05 UnitRef cross-slice gap (same
-        # precedent as agent_real_strands / agent_real_adk demos);
-        # tolerate the rejection at the runner level so the PRE-side
-        # canonical events still land and the verify step gates the
-        # reserve/decision audit rows.
-        if outcome.reservation_ids:
-            try:
-                await client.emit_llm_call_post(
-                    run_id=run_id,
-                    step_id=step_id,
-                    llm_call_id=llm_call_id,
-                    decision_id=outcome.decision_id,
-                    reservation_id=outcome.reservation_ids[0],
-                    provider_reported_amount_atomic="",
-                    estimated_amount_atomic=str(amount),
-                    unit=unit,
-                    pricing=pricing,
-                    provider_event_id=f"dspy-{substep}-resp-1",
-                    outcome="SUCCESS",
-                )
-            except _SGE as commit_exc:
-                print(
-                    f"[demo] WARN: emit_llm_call_post rejected for "
-                    f"substep={substep}: {commit_exc} — tolerating per "
-                    "D05 UnitRef gap (cross-slice tracking); the "
-                    "reserve audit row still landed."
-                )
-        return (False, decision_id)
-
-    # ── Step 1 ALLOW: end-to-end LiteLLM-routed substep ──
-    _allow_denied, allow_decision_id = await emit_dspy_lifecycle(
-        substep="allow",
-        model_str="openai/gpt-4o-mini",
-        prompt_text="What is 2+2?",
-        amount=22,
-    )
+        uninstall_shim()
+        await client.close()
+        return 7
     print(
-        f"[demo] step 1 ALLOW ok — decision_id={allow_decision_id[:8]} "
-        f"reserved + committed (LiteLLM-routed substep)"
+        f"[demo] agent_real_dspy ALLOW ok — real ChainOfThought hit provider "
+        f"(answer={answer!r}); counting {pre} -> {post}"
     )
 
-    # ── Step 2 DENY: huge claim → STOP/DENY ──
-    deny_raised, deny_decision_id = await emit_dspy_lifecycle(
-        substep="deny",
-        model_str="openai/gpt-4o-mini",
-        prompt_text="DENY test",
-        amount=999_999_999,
-        expect_deny=True,
+    # ── DENY turn ───────────────────────────────────────────────────
+    # Force a genuine fail-closed DENY by reinstalling the shim against a
+    # NON-EXISTENT budget (the proven COV_D12 litellm_sdk_deny mechanism — the
+    # demo budget's hard-cap is a 1B CONTRACT rule, but the shim's estimator
+    # caps max_tokens at the model context window so a claim can never reach
+    # it; a bogus budget yields a deterministic ledger STOP regardless). The
+    # shim's request_decision is STOPped BEFORE litellm's provider HTTP, so the
+    # counting-stub is UNCHANGED. The ALLOW positive control above already
+    # proved the sidecar is healthy and gating, so a SpendGuard fail-closed
+    # exception here is a genuine budget DENY (not an outage). The
+    # zero-provider-HTTP counter is the enforcement proof (same as D12).
+    from spendguard.errors import SpendGuardError
+
+    uninstall_shim()
+    install_shim(SpendGuardShimOptions(
+        client=client,
+        tenant_id=tenant_id,
+        budget_id="deadbeef-0000-4000-8000-000000000000",  # non-existent
+        fail_open=False,
+    ))
+    dspy.configure(
+        lm=dspy.LM(
+            "openai/gpt-4o-mini",
+            api_base=f"{stub_url}/v1",
+            api_key=os.environ.get("OPENAI_API_KEY", "sk-spendguard-demo-stub"),
+            max_tokens=16,
+        ),
     )
-    if deny_raised:
+    qa_deny = dspy.ChainOfThought("question -> answer")
+
+    pre_deny = _read_counting_stub_hits_sync()
+    blocked = False
+    try:
+        await qa_deny.acall(question="DENY test")
+    except (DecisionDenied, SpendGuardError):
+        blocked = True
+    except Exception as exc:  # noqa: BLE001 — deny may surface wrapped by dspy/litellm
+        if _is_deny(exc):
+            blocked = True
+        else:
+            uninstall_shim()
+            await client.close()
+            raise
+    post_deny = _read_counting_stub_hits_sync()
+
+    if not blocked:
         print(
-            f"[demo] step 2 DENY ok — DecisionDenied raised "
-            f"decision_id={deny_decision_id[:8]} BEFORE upstream HTTP"
+            "[demo] FATAL: dspy DENY turn was NOT fail-closed "
+            "(no SpendGuard block raised)",
+            file=sys.stderr,
         )
-    else:
+        uninstall_shim()
+        await client.close()
+        return 7
+    if post_deny != pre_deny:
         print(
-            "[demo] WARN: step 2 DENY did not raise DecisionDenied; "
-            "sidecar contract may not enforce the cap in this demo "
-            "configuration. Treating as deferred (D05 UnitRef gap precedent)."
+            f"[demo] FATAL: dspy DENY turn hit the provider "
+            f"(counting-stub {pre_deny} -> {post_deny})",
+            file=sys.stderr,
         )
-
-    # ── Step 3 CUSTOM-LM: direct-path bypass of LiteLLM ──
-    _custom_denied, custom_decision_id = await emit_dspy_lifecycle(
-        substep="custom",
-        model_str="custom-bypass",
-        prompt_text="CUSTOM-LM test",
-        amount=17,
-    )
+        uninstall_shim()
+        await client.close()
+        return 7
     print(
-        f"[demo] step 3 CUSTOM-LM ok — direct-path coverage proven "
-        f"decision_id={custom_decision_id[:8]} (model=custom-bypass)"
+        "[demo] agent_real_dspy DENY ok — the litellm shim fail-closed the "
+        "budget-denied call BEFORE the provider; counting-stub UNCHANGED "
+        f"({pre_deny} -> {post_deny})"
     )
 
-    # ── Structural callback exercise (off main loop via thread) ──
-    # Confirm the callback's signature / contextvar / stash lifecycle
-    # works against a fake in-thread client. This proves the callback
-    # contract end-to-end without needing to cross the asyncio loop
-    # boundary (which is forbidden by design.md §5 SyncInAsyncContext).
-    def _structural_check():
-        from unittest.mock import AsyncMock, MagicMock as _MM
-
-        fake = _MM()
-        fake.tenant_id = "tenant-demo"
-        fake.session_id = "session-demo"
-        fake_outcome = SimpleNamespace(
-            decision_id="dec-demo",
-            reservation_ids=("res-demo",),
-            audit_decision_event_id="audit-demo",
-            decision="CONTINUE",
-        )
-        fake.request_decision = AsyncMock(return_value=fake_outcome)
-        fake.emit_llm_call_post = AsyncMock(return_value=None)
-
-        fake_cb = SpendGuardDSPyCallback(
-            client=fake,
-            budget_resolver=resolve,
-            claim_estimator=estimate_small,
-            claim_reconciler=reconcile,
-        )
-        ci = SimpleNamespace(model="openai/gpt-4o-mini")
-        fake_cb.on_lm_start("structural-1", ci, {"prompt": "hello"})
-        fake_cb.on_lm_end(
-            "structural-1",
-            [SimpleNamespace(usage={"total_tokens": 11}, id="x")],
-            None,
-        )
-        return fake_cb.pending_count
-
-    pending_after = await asyncio.to_thread(_structural_check)
-    assert pending_after == 0, "structural check left _PENDING non-empty"
-    print(
-        "[demo] structural callback check ok — on_lm_start/end "
-        "lifecycle clean (no pending stash)"
-    )
-
-    print(
-        "[demo] agent_real_dspy ALL 3 steps PASS "
-        f"(allow={'real' if real_dspy_used else 'stub'} "
-        f"deny_raised={deny_raised})"
-    )
+    uninstall_shim()
     await client.close()
+    print(
+        "[demo] agent_real_dspy ALL steps PASS "
+        "(real ALLOW + real DENY enforced by the litellm SDK shim, no fakes)"
+    )
     return 0
 
 

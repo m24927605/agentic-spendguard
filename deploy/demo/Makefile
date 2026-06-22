@@ -1967,17 +1967,17 @@ demo-verify-agent-real-dspy:
 		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
 		      AND event_type = 'spendguard.audit.decision' \
 		      AND convert_from(decode(payload_json::jsonb->>'data_b64', 'base64'), 'UTF8')::jsonb \
-		          #>> '{spendguard,integration}' = 'dspy'; \
+		          #>> '{spendguard,integration}' = 'litellm'; \
 		   IF v_decision < 1 THEN \
 		     RAISE EXCEPTION 'COV_D21_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
 		   END IF; \
 		   IF v_dspy < 1 THEN \
-		     RAISE EXCEPTION 'COV_D21_GATE: canonical_events.decision with integration=dspy >= 1 expected, got %', v_dspy; \
+		     RAISE EXCEPTION 'COV_D21_GATE: canonical_events.decision with integration=litellm >= 1 expected (dspy is enforced via the litellm SDK shim — dspy 3.x swallows callback exceptions so the dspy callback cannot fail-closed), got %', v_dspy; \
 		   END IF; \
 		   IF v_outcome < 1 THEN \
 		     RAISE EXCEPTION 'COV_D21_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
 		   END IF; \
-		   RAISE NOTICE 'COV_D21 CANONICAL OK: decision=% outcome=% dspy_tagged=%', v_decision, v_outcome, v_dspy; \
+		   RAISE NOTICE 'COV_D21 CANONICAL OK: decision=% outcome=% litellm_shim_tagged=%', v_decision, v_outcome, v_dspy; \
 		 END; \$$\$$;"
 	@echo "[demo] COV_D21 SLICE 3 agent_real_dspy verification done"
 
