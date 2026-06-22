@@ -10,12 +10,13 @@
 #   2. Build the @spendguard/sdk workspace dependency (its dist/ is gitignored,
 #      and the integration imports its runtime helpers — computePromptHash,
 #      deriveIdempotencyKey, newUuid7 — so the dist must exist before tests).
-#   3. Lint (biome via dlx), typecheck (tsc x2), build (tsup), unit tests
-#      (vitest), resolving `import * as bp from '.botpress'` against the
-#      COMMITTED `.botpress/` typings. CI does NOT run `bp build`: although
-#      it claims offline, the @botpress/cli reaches Botpress Cloud and has
-#      hung to the 6h job ceiling. Regenerate locally with `pnpm bp:build`
-#      and commit `.botpress/` when integration.definition.ts changes.
+#   3. Generate the Botpress `.botpress` module via `bp build` (offline
+#      codegen from integration.definition.ts; needed for the bare
+#      `import * as bp from '.botpress'` to resolve). Bounded by a 5m STEP
+#      timeout — the @botpress/cli can intermittently hang reaching Botpress
+#      Cloud (it hung to the 6h job ceiling once when unbounded).
+#   4. Lint (biome via dlx), typecheck (tsc x2), build (tsup), unit tests
+#      (vitest).
 #
 # The Docker / real-Botpress-server integration tier is intentionally NOT run
 # here: the previous hook-based integration tests targeted an architecture
@@ -67,8 +68,16 @@ jobs:
         # gitignored, so build it before typecheck/test resolve the package.
         run: pnpm --filter @spendguard/sdk run build
 
-      # NOTE: no `bp build` step — `.botpress/` typings are committed; running
-      # the codegen in CI has hung to the 6h ceiling reaching Botpress Cloud.
+      - name: Generate Botpress typings (offline codegen)
+        # `bp build` regenerates the `.botpress/` module (typings +
+        # node_modules/.botpress link + index.js) that src resolves via the
+        # bare `import * as bp from '.botpress'` — required for typecheck/build.
+        # Normally offline and fast (~seconds), but the @botpress/cli can
+        # intermittently hang reaching Botpress Cloud; the 5m STEP timeout caps
+        # that (it hung to the 6h job ceiling once with no timeout).
+        working-directory: integrations/botpress
+        timeout-minutes: 5
+        run: pnpm exec bp build -y
 
       - name: Lint
         # The root pnpm-lock.yaml resolved @biomejs/biome's platform binary for
