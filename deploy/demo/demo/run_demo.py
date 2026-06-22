@@ -5416,12 +5416,17 @@ async def run_autogen_mode(lineage: str = "autogen") -> int:  # noqa: PLR0915
     LINEAGE = hook_mod.LINEAGE
     print(f"[demo] autogen LINEAGE probe → {LINEAGE} (requested lineage={lineage})")
 
+    # One estimator drives BOTH turns: a mutable flag flips a small ALLOW claim
+    # to a 2B raw claim that trips the demo contract's 1B hard-cap-deny rule.
+    deny_state = {"deny": False}
+
     def estimate_claims(_messages):
+        amount = "2000000000" if deny_state["deny"] else "500"
         return [
             common_pb2.BudgetClaim(
                 budget_id=budget_id,
                 unit=unit,
-                amount_atomic="500",
+                amount_atomic=amount,
                 direction=common_pb2.BudgetClaim.DEBIT,
                 window_instance_id=window_id,
             ),
@@ -5480,105 +5485,88 @@ async def run_autogen_mode(lineage: str = "autogen") -> int:  # noqa: PLR0915
             claim_estimator=estimate_claims,
         )
         agent = AssistantAgent(name="spendguard_autogen_demo", model_client=guarded)
+
+        # ── ALLOW turn ──────────────────────────────────────────────
+        pre = _read_counting_stub_hits_sync()
         async with autogen_run_context(AutoGenRunContext(run_id=run_id)):
             cancellation_token = CancellationToken()
             result = await agent.on_messages(
                 [TextMessage(content="Say hello in three words.", source="user")],
                 cancellation_token,
             )
-        # AutoGen / AG2 return a ``Response`` with a chat_message attr.
+        post = _read_counting_stub_hits_sync()
+        if post <= pre:
+            print(
+                f"[demo] FATAL: autogen ALLOW did not reach provider "
+                f"(counting-stub {pre} -> {post})",
+                file=sys.stderr,
+            )
+            await client.close()
+            return 7
         chat_msg = getattr(result, "chat_message", None)
         content_snippet = getattr(chat_msg, "content", "") if chat_msg else ""
         print(
-            f"[demo] agent_real_autogen run completed: ALLOW path "
-            f"lineage_used={lineage_used} content={str(content_snippet)[:48]!r}"
+            f"[demo] agent_real_autogen ALLOW ok lineage_used={lineage_used} "
+            f"content={str(content_snippet)[:48]!r}; counting {pre} -> {post}"
+        )
+
+        # ── DENY turn (REAL — no fabrication) ───────────────────────
+        # Flip the SAME estimator to a 2B raw claim → contract hard-cap-deny;
+        # the wrapper's create() raises DecisionDenied/DecisionStopped BEFORE
+        # the inner OpenAIChatCompletionClient HTTP. The counting-stub MUST be
+        # unchanged across the DENY turn.
+        from spendguard.errors import DecisionDenied
+        deny_state["deny"] = True
+        pre_deny = _read_counting_stub_hits_sync()
+        denied = False
+        async with autogen_run_context(AutoGenRunContext(run_id=f"{run_id}:deny")):
+            try:
+                await agent.on_messages(
+                    [TextMessage(content="DENY test", source="user")],
+                    CancellationToken(),
+                )
+            except DecisionDenied:
+                denied = True
+            except Exception as exc:  # noqa: BLE001 — deny may surface wrapped
+                cur, seen = exc, set()
+                while cur is not None and id(cur) not in seen:
+                    seen.add(id(cur))
+                    if isinstance(cur, DecisionDenied):
+                        denied = True
+                        break
+                    cur = cur.__cause__ or cur.__context__
+                if not denied:
+                    raise
+        post_deny = _read_counting_stub_hits_sync()
+        if not denied:
+            print(
+                "[demo] FATAL: autogen DENY turn did NOT raise DecisionDenied",
+                file=sys.stderr,
+            )
+            await client.close()
+            return 7
+        if post_deny != pre_deny:
+            print(
+                f"[demo] FATAL: autogen DENY turn hit the provider "
+                f"(counting-stub {pre_deny} -> {post_deny})",
+                file=sys.stderr,
+            )
+            await client.close()
+            return 7
+        print(
+            "[demo] agent_real_autogen DENY ok — real AssistantAgent raised "
+            f"DecisionDenied; counting-stub UNCHANGED ({pre_deny} -> {post_deny})"
         )
         real_autogen_used = True
     except ImportError as exc:
+        # No fabrication: the agent_real_autogen runner ships autogen/ag2.
         print(
-            f"[demo] autogen-agentchat / ag2 not importable ({exc}); "
-            "using duck-typed driver path (CI smoke gate).",
+            f"[demo] FATAL: autogen/ag2 not importable in the autogen runner "
+            f"({exc}); refusing to fake a pass.",
             file=sys.stderr,
         )
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"[demo] AssistantAgent.on_messages raised "
-            f"{type(exc).__name__}: {exc}; falling back to duck-typed path.",
-            file=sys.stderr,
-        )
-
-    if not real_autogen_used:
-        # Duck-typed driver — call wrapper.create directly without an
-        # AssistantAgent. The wrapper has no autogen-agentchat
-        # dependency at runtime; only the demo's optional agent layer
-        # does. This exercises the full PRE/POST lifecycle the way the
-        # AssistantAgent would, with a FakeChatCompletionClient
-        # standing in for the OpenAIChatCompletionClient.
-
-        class _FakeInner:
-            """Minimal duck-typed inner client matching the wrapper's needs."""
-
-            def __init__(self):
-                self.calls = 0
-
-            async def create(self, messages, *, tools=(), tool_choice="auto",
-                              json_output=None, extra_create_args=None,
-                              cancellation_token=None, **_kwargs):
-                self.calls += 1
-                # Shape mirrors autogen_core.models.CreateResult.
-                return SimpleNamespace(
-                    content="hi from duck-typed inner",
-                    usage=SimpleNamespace(
-                        prompt_tokens=12, completion_tokens=20
-                    ),
-                )
-
-            def create_stream(self, messages, **_kwargs):
-                async def _s():
-                    yield SimpleNamespace(content="chunk")
-
-                return _s()
-
-            async def close(self):
-                """No-op for the duck-typed fake."""
-
-            def actual_usage(self):
-                return SimpleNamespace(prompt_tokens=0, completion_tokens=0)
-
-            def total_usage(self):
-                return SimpleNamespace(prompt_tokens=12, completion_tokens=20)
-
-            def count_tokens(self, messages, *, tools=()):
-                return sum(len(getattr(m, "content", "")) for m in messages) // 4
-
-            def remaining_tokens(self, messages, *, tools=()):
-                return 1000
-
-            @property
-            def capabilities(self):
-                return {"vision": False}
-
-            @property
-            def model_info(self):
-                return {"family": "duck-typed"}
-
-        inner = _FakeInner()
-        guarded = SpendGuardChatCompletionClient(
-            inner=inner,
-            client=client,
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-            claim_estimator=estimate_claims,
-        )
-        messages = [SimpleNamespace(content="Say hello in three words.", source="user", role="user")]
-        async with autogen_run_context(AutoGenRunContext(run_id=run_id)):
-            result = await guarded.create(messages)
-        print(
-            f"[demo] agent_real_autogen run completed: ALLOW path (stub) "
-            f"inner_calls={inner.calls} usage_total={result.usage.prompt_tokens + result.usage.completion_tokens}"
-        )
+        await client.close()
+        return 8
 
     await client.close()
     return 0

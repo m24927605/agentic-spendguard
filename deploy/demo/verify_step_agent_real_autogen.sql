@@ -83,6 +83,13 @@ BEGIN
     IF v_commit < 1 THEN
         RAISE EXCEPTION 'COV_D24_GATE: ledger_transactions.commit_estimated >= 1 expected (ALLOW), got %', v_commit;
     END IF;
+    -- The live driver now ALWAYS exercises a real DENY turn (a real
+    -- AssistantAgent.on_messages with a 2B raw claim hits the contract
+    -- hard-cap-deny rule and raises DecisionDenied before the provider), so a
+    -- denied_decision row MUST be present. No fabrication.
+    IF v_denied < 1 THEN
+        RAISE EXCEPTION 'COV_D24_GATE: ledger_transactions.denied_decision >= 1 expected (real DENY turn), got %', v_denied;
+    END IF;
 
     RAISE NOTICE 'COV_D24 LEDGER OK: reserve=% commit=% denied=%',
         v_reserve, v_commit, v_denied;
