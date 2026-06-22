@@ -52,4 +52,15 @@ public interface ISidecarClient : IDisposable
     Task<ReleaseReservationResponse> ReleaseReservationAsync(
         ReleaseReservationRequest request,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Emit a single trace event (LLM_CALL_POST drives the commit lifecycle)
+    /// over the <c>EmitTraceEvents</c> bidi stream and await the ack. Throws
+    /// if the sidecar does not ACCEPT the event (review-standards: the commit
+    /// MUST surface a rejection rather than silently succeed). Mirrors the
+    /// Python SDK's <c>emit_llm_call_post</c>.
+    /// </summary>
+    Task EmitTraceEventAsync(
+        TraceEvent traceEvent,
+        CancellationToken ct = default);
 }

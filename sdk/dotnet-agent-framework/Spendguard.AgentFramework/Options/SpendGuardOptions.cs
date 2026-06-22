@@ -96,6 +96,40 @@ public sealed class SpendGuardOptions
     public Guid? UnitId { get; set; }
 
     /// <summary>
+    /// Convenience <c>token_kind</c> for the projected unit (e.g.
+    /// <c>output_token</c>). Canonical truth is <see cref="UnitId"/>.
+    /// </summary>
+    public string UnitTokenKind { get; set; } = "output_token";
+
+    /// <summary>Convenience <c>model_family</c> for the projected unit.</summary>
+    public string UnitModelFamily { get; set; } = "gpt-4";
+
+    /// <summary>
+    /// Per-call projected claim amount (atomic units of <see cref="UnitId"/>).
+    /// Drives the LLM_CALL_PRE reservation. When null the adapter falls back to
+    /// the token estimate. The demo sets it per turn (tiny ALLOW claim, a
+    /// contract-cap-busting DENY claim).
+    /// </summary>
+    public long? ProjectedClaimAmountAtomic { get; set; }
+
+    /// <summary>
+    /// PricingFreeze tuple for the commit (LLM_CALL_POST). The sidecar
+    /// validates equality against <c>ledger.pricing_snapshots</c>, so these
+    /// MUST match the contract bundle the sidecar loaded (operators source
+    /// them from the bundles <c>runtime.env</c>). Required for a real commit.
+    /// </summary>
+    public string PricingVersion { get; set; } = string.Empty;
+
+    /// <summary>Hex-encoded sha256 of the price snapshot (PricingFreeze.price_snapshot_hash).</summary>
+    public string PriceSnapshotHashHex { get; set; } = string.Empty;
+
+    /// <summary>PricingFreeze.fx_rate_version.</summary>
+    public string FxRateVersion { get; set; } = string.Empty;
+
+    /// <summary>PricingFreeze.unit_conversion_version.</summary>
+    public string UnitConversionVersion { get; set; } = string.Empty;
+
+    /// <summary>
     /// Validates this option bag. Throws <see cref="ArgumentException"/>
     /// on any disallowed combination. Called by DI registration so misconfig
     /// surfaces at startup, not on the hot path.

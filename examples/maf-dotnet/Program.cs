@@ -90,6 +90,25 @@ internal static class Program
             ? v
             : 30_000;
 
+    // The unit MUST be the canonical ledger UUID (the commit lands in the uuid
+    // ledger_units column). The full pricing tuple is sourced from the bundles
+    // runtime.env so the commit's PricingFreeze matches the contract bundle.
+    private static readonly string UnitId =
+        Environment.GetEnvironmentVariable("SPENDGUARD_UNIT_ID")
+        ?? "66666666-6666-4666-8666-666666666666";
+
+    private static readonly string PricingVersion =
+        Environment.GetEnvironmentVariable("SPENDGUARD_PRICING_VERSION") ?? "demo-pricing-v1";
+
+    private static readonly string FxRateVersion =
+        Environment.GetEnvironmentVariable("SPENDGUARD_FX_RATE_VERSION") ?? "demo-fx-v1";
+
+    private static readonly string UnitConversionVersion =
+        Environment.GetEnvironmentVariable("SPENDGUARD_UNIT_CONVERSION_VERSION") ?? "demo-units-v1";
+
+    private static readonly string PriceSnapshotHashHex =
+        Environment.GetEnvironmentVariable("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX") ?? string.Empty;
+
     public static async Task<int> Main(string[] args)
     {
         bool useReal = args.Any(a => a == "--real");
@@ -243,8 +262,23 @@ internal static class Program
             o.WindowInstanceId = WindowInstanceId;
             o.SidecarSocketPath = SocketPath;
             o.OnSidecarUnavailable = OnSidecarUnavailable.Deny;
+            // UUID unit + full pricing tuple so the ledger reserve resolves and
+            // the commit's PricingFreeze matches the contract bundle.
+            o.UnitId = Guid.Parse(UnitId);
+            o.UnitTokenKind = "output_token";
+            o.UnitModelFamily = "gpt-4";
+            o.PricingVersion = PricingVersion;
+            o.FxRateVersion = FxRateVersion;
+            o.UnitConversionVersion = UnitConversionVersion;
+            o.PriceSnapshotHashHex = PriceSnapshotHashHex;
+            // Tiny ALLOW claim; flipped to a 2B contract-cap-busting claim for
+            // the DENY turn below. The middleware reads this per call.
+            o.ProjectedClaimAmountAtomic = 100;
         });
         await using var sp = services.BuildServiceProvider();
+        // The middleware caches options.Value (same instance); flipping
+        // ProjectedClaimAmountAtomic between turns drives ALLOW vs DENY.
+        var sgOptions = sp.GetRequiredService<IOptions<SpendGuardOptions>>().Value;
 
         // 3. Drive a handshake before middleware fires (S3 reviewer gate).
         var sidecar = sp.GetRequiredService<ISidecarClient>();
@@ -281,8 +315,10 @@ internal static class Program
                 $"FATAL ALLOW: counting-stub pre={preAllow} post={postAllow} (expected +1)");
         }
 
-        // DENY
-        Console.WriteLine("[demo] (2) DENY step — forcing hard-cap overflow");
+        // DENY — flip the projected claim to a 2B raw amount through the gate
+        // so the sidecar's contract evaluator hits the 1B hard-cap rule.
+        Console.WriteLine("[demo] (2) DENY step — 2B raw claim through the gate");
+        sgOptions.ProjectedClaimAmountAtomic = 2_000_000_000L;
         var preDeny = postAllow;
         bool denied = false;
         try
@@ -310,8 +346,10 @@ internal static class Program
                 $"FATAL DENY INV-1.6: counting-stub pre={preDeny} post={postDeny} (expected 0)");
         }
 
-        // ALLOW2 (STREAM replacement — design.md §3 non-goal)
+        // ALLOW2 (STREAM replacement — design.md §3 non-goal). Reset the claim
+        // back to the tiny ALLOW amount.
         Console.WriteLine("[demo] (3) ALLOW2 step — second small message within budget");
+        sgOptions.ProjectedClaimAmountAtomic = 100L;
         var preAllow2 = postDeny;
         var r3 = await gated.GetResponseAsync(new[]
         {
@@ -419,6 +457,10 @@ internal static class Program
         public Task<ReleaseReservationResponse> ReleaseReservationAsync(
             ReleaseReservationRequest request, CancellationToken ct = default)
             => Task.FromResult(new ReleaseReservationResponse());
+
+        public Task EmitTraceEventAsync(
+            TraceEvent traceEvent, CancellationToken ct = default)
+            => Task.CompletedTask;
 
         public void Dispose() { }
     }

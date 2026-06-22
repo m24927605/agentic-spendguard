@@ -151,6 +151,43 @@ public sealed class SidecarClient : ISidecarClient
     }
 
     /// <inheritdoc/>
+    public async Task EmitTraceEventAsync(
+        TraceEvent traceEvent,
+        CancellationToken ct = default)
+    {
+        if (traceEvent is null) throw new ArgumentNullException(nameof(traceEvent));
+        if (!_handshakeComplete)
+        {
+            throw new HandshakeRequiredException(
+                "EmitTraceEvent called before Handshake completed.");
+        }
+
+        if (string.IsNullOrEmpty(traceEvent.SessionId))
+        {
+            traceEvent.SessionId = _sessionId;
+        }
+
+        // One-shot bidi stream: write the single event, half-close, then drain
+        // the ack stream. The sidecar emits exactly one ack per inbound event;
+        // any status other than ACCEPTED means the commit lifecycle failed and
+        // the caller MUST see it (mirrors the Python SDK's emit_llm_call_post).
+        using var call = _stub.EmitTraceEvents(cancellationToken: ct);
+        await call.RequestStream.WriteAsync(traceEvent).ConfigureAwait(false);
+        await call.RequestStream.CompleteAsync().ConfigureAwait(false);
+        while (await call.ResponseStream.MoveNext(ct).ConfigureAwait(false))
+        {
+            TraceEventAck ack = call.ResponseStream.Current;
+            if (ack.Status != TraceEventAck.Types.Status.Accepted)
+            {
+                throw new SpendGuardCommitException(
+                    $"EmitTraceEvents rejected: status={ack.Status} " +
+                    $"code={(ack.Error is null ? 0 : ack.Error.Code)} " +
+                    $"message={(ack.Error is null ? string.Empty : ack.Error.Message)}");
+            }
+        }
+    }
+
+    /// <inheritdoc/>
     public void Dispose()
     {
         if (OwnsChannel)
@@ -167,4 +204,15 @@ public sealed class HandshakeRequiredException : InvalidOperationException
 {
     /// <summary>Creates a new <see cref="HandshakeRequiredException"/> with the supplied message.</summary>
     public HandshakeRequiredException(string message) : base(message) { }
+}
+
+/// <summary>
+/// Raised when the sidecar does not ACCEPT an emitted trace event (the commit
+/// lifecycle failed). Parity with the Python SDK surfacing
+/// <c>EmitTraceEvents rejected</c>.
+/// </summary>
+public sealed class SpendGuardCommitException : Exception
+{
+    /// <summary>Creates a new instance with the supplied message.</summary>
+    public SpendGuardCommitException(string message) : base(message) { }
 }

@@ -29,6 +29,18 @@
 name: spendguard-demo
 
 services:
+  # ── sidecar peer-uid override ─────────────────────────────────────────
+  # The .NET runner connects to the adapter UDS as root (uid 0); the sidecar
+  # SO_PEERCRED gate defaults to its own uid (65532) and would reject root —
+  # the connection is closed before the HTTP/2 handshake completes, surfacing
+  # as a gRPC "Unavailable" on the .NET side. Accept root for this local-UDS
+  # demo (production uses mTLS+SPIFFE, never this path). Mirrors the override
+  # every other root-runner overlay (incl. maf_python) already carries — the
+  # 2026-06-22 peer-uid batch covered agent_real_*/maf_python* but missed this
+  # maf_dotnet overlay.
+  sidecar:
+    environment:
+      SPENDGUARD_SIDECAR_ADAPTER_EXPECTED_PEER_UID: "0"
   # ── counting-stub ────────────────────────────────────────────────────
   counting-stub:
     image: python:3.12-slim
@@ -154,6 +166,10 @@ services:
       - ../..:/opt/spendguard:ro
       # Sidecar UDS shared with the rest of the stack.
       - sidecar-uds:/var/run/spendguard
+      # Source the pricing freeze from bundles runtime.env so the commit's
+      # PricingFreeze (snapshot hash / fx / unit conversion) matches the
+      # contract bundle the sidecar loaded — else CommitEstimated is rejected.
+      - bundles-data:/var/lib/spendguard/bundles:ro
       # NuGet cache persistence across re-runs.
       - maf-dotnet-runner-nuget:/var/cache/nuget
       # Writable staging dir for `dotnet build`. Named volume (not
@@ -192,6 +208,19 @@ services:
         echo "[maf-dotnet-runner] dotnet build --configuration Release..."
         dotnet build --configuration Release
 
+        # Source the bundles runtime.env so SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX /
+        # FX / UNIT_CONVERSION match the contract bundle (the .NET demo reads
+        # them via Environment.GetEnvironmentVariable for the commit's pricing).
+        if [ -f /var/lib/spendguard/bundles/runtime.env ]; then
+          echo "[maf-dotnet-runner] sourcing /var/lib/spendguard/bundles/runtime.env..."
+          set -a
+          . /var/lib/spendguard/bundles/runtime.env
+          set +a
+        else
+          echo "[maf-dotnet-runner] FATAL: bundles runtime.env not found" >&2
+          exit 1
+        fi
+
         echo "[maf-dotnet-runner] dotnet --real..."
         exec dotnet bin/Release/net8.0/spendguard-maf-dotnet-demo.dll --real
     depends_on:
@@ -204,5 +233,6 @@ services:
         aliases: [maf-dotnet-runner]
 
 volumes:
+  bundles-data:
   maf-dotnet-runner-nuget:
   maf-dotnet-runner-stage:

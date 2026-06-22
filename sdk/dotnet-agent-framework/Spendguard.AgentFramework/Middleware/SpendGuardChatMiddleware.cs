@@ -3,11 +3,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -151,10 +153,11 @@ public sealed class SpendGuardChatMiddleware : DelegatingChatClient
             throw;
         }
 
-        // 7) Emit LLM_CALL_POST — stubbed for this slice (SLICE_05 lands the
-        //    EmitTraceEvents server-stream wire). The hook is present so
-        //    reviewers can verify the placement; the no-op stays explicit.
-        EmitLlmCallPostStub(decision, response);
+        // 7) Emit LLM_CALL_POST — commit the reservation with the real usage
+        //    over the EmitTraceEvents bidi wire.
+        await EmitLlmCallPostAsync(
+            decision, response, runId, stepId, llmCallId, cancellationToken)
+            .ConfigureAwait(false);
 
         return response;
     }
@@ -224,10 +227,22 @@ public sealed class SpendGuardChatMiddleware : DelegatingChatClient
 
         if (_options.UnitId is Guid unitId)
         {
-            inputs.ProjectedUnit = new UnitRef
+            UnitRef unitRef = BuildUnitRef(unitId);
+            inputs.ProjectedUnit = unitRef;
+
+            // Populate the repeated projected_claims the ledger requires for a
+            // reserve (the sidecar rejects an empty list). The amount is the
+            // operator-supplied per-call override (the demo flips it tiny for
+            // ALLOW / 2B for DENY) or the token estimate.
+            long amount = _options.ProjectedClaimAmountAtomic ?? Math.Max(inputTokens, 1);
+            inputs.ProjectedClaims.Add(new BudgetClaim
             {
-                UnitId = unitId.ToString(),
-            };
+                BudgetId = _options.BudgetId,
+                Unit = unitRef.Clone(),
+                AmountAtomic = amount.ToString(CultureInfo.InvariantCulture),
+                Direction = BudgetClaim.Types.Direction.Debit,
+                WindowInstanceId = _options.WindowInstanceId,
+            });
         }
 
         return inputs;
@@ -331,13 +346,87 @@ public sealed class SpendGuardChatMiddleware : DelegatingChatClient
         }
     }
 
-    private void EmitLlmCallPostStub(DecisionResponse decision, ChatResponse response)
+    /// <summary>
+    /// Commit the reservation by emitting an LLM_CALL_POST trace event with the
+    /// real usage. estimated_amount_atomic + outcome=SUCCESS drives the
+    /// sidecar's CommitEstimated path (reservation 'reserved' -> 'committed').
+    /// </summary>
+    private async Task EmitLlmCallPostAsync(
+        DecisionResponse decision,
+        ChatResponse response,
+        string runId,
+        string stepId,
+        string llmCallId,
+        CancellationToken ct)
     {
-        // SLICE_05 lands EmitTraceEvents. For now we log so callers can
-        // verify the hook fired in tests (review-standards T1).
-        _logger.LogDebug(
-            "spendguard LLM_CALL_POST stub: decision_id={DecisionId} usage_tokens={Tokens}",
-            decision.DecisionId,
-            response.Usage?.TotalTokenCount ?? 0L);
+        // Only commit when a reservation was actually issued AND a unit is
+        // wired (recipe-style integrations with no ledger reserve skip POST).
+        if (decision.ReservationIds.Count == 0 || _options.UnitId is not Guid unitId)
+        {
+            _logger.LogDebug(
+                "spendguard LLM_CALL_POST skipped (reservations={Count} unit_set={UnitSet})",
+                decision.ReservationIds.Count,
+                _options.UnitId.HasValue);
+            return;
+        }
+
+        long totalTokens = response.Usage?.TotalTokenCount ?? 0L;
+        if (totalTokens <= 0)
+        {
+            // CommitEstimated requires a positive estimate; floor to 1 when the
+            // provider did not return usage.
+            totalTokens = 1;
+        }
+
+        var payload = new LlmCallPostPayload
+        {
+            ReservationId = decision.ReservationIds[0],
+            ProviderReportedAmountAtomic = string.Empty,
+            EstimatedAmountAtomic = totalTokens.ToString(CultureInfo.InvariantCulture),
+            Unit = BuildUnitRef(unitId),
+            Pricing = BuildPricingFreeze(),
+            ProviderEventId = response.ResponseId ?? string.Empty,
+            Outcome = LlmCallPostPayload.Types.Outcome.Success,
+        };
+
+        var ev = new TraceEvent
+        {
+            SessionId = _sidecar.SessionId,
+            Ids = new SpendGuardIds
+            {
+                RunId = runId,
+                StepId = stepId,
+                LlmCallId = llmCallId,
+                DecisionId = decision.DecisionId,
+            },
+            Kind = TraceEvent.Types.EventKind.LlmCallPost,
+            EventTime = Timestamp.FromDateTime(DateTime.UtcNow),
+            LlmCallPost = payload,
+        };
+
+        await _sidecar.EmitTraceEventAsync(ev, ct).ConfigureAwait(false);
+    }
+
+    private UnitRef BuildUnitRef(Guid unitId) => new UnitRef
+    {
+        UnitId = unitId.ToString(),
+        TokenKind = _options.UnitTokenKind ?? string.Empty,
+        ModelFamily = _options.UnitModelFamily ?? string.Empty,
+    };
+
+    private PricingFreeze BuildPricingFreeze()
+    {
+        var pricing = new PricingFreeze
+        {
+            PricingVersion = _options.PricingVersion ?? string.Empty,
+            FxRateVersion = _options.FxRateVersion ?? string.Empty,
+            UnitConversionVersion = _options.UnitConversionVersion ?? string.Empty,
+        };
+        if (!string.IsNullOrEmpty(_options.PriceSnapshotHashHex))
+        {
+            pricing.PriceSnapshotHash = ByteString.CopyFrom(
+                Convert.FromHexString(_options.PriceSnapshotHashHex));
+        }
+        return pricing;
     }
 }
