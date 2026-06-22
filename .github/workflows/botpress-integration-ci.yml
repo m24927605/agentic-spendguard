@@ -6,16 +6,16 @@
 # upstream provider and committing real usage afterwards.
 #
 # The pipeline (all offline / no Botpress Cloud auth):
-#   1. Install the pnpm workspace (frozen lockfile).
-#   2. Build the @spendguard/sdk workspace dependency (its dist/ is gitignored,
-#      and the integration imports its runtime helpers — computePromptHash,
-#      deriveIdempotencyKey, newUuid7 — so the dist must exist before tests).
-#   3. Generate the Botpress `.botpress` module via `bp build` (offline
+#   1. Install standalone (`pnpm install --ignore-workspace`): integrations/botpress
+#      was split out of the pnpm workspace 2026-06-22, so it resolves its own
+#      devDeps + peers (@spendguard/sdk ^0.5.0 from npm, @botpress/sdk/cli) here
+#      rather than dragging the @botpress/cli tree into the core SDK lockfile.
+#   2. Generate the Botpress `.botpress` module via `bp build` (offline
 #      codegen from integration.definition.ts; needed for the bare
 #      `import * as bp from '.botpress'` to resolve). Bounded by a 5m STEP
 #      timeout — the @botpress/cli can intermittently hang reaching Botpress
 #      Cloud (it hung to the 6h job ceiling once when unbounded).
-#   4. Lint (biome via dlx), typecheck (tsc x2), build (tsup), unit tests
+#   3. Lint (biome via dlx), typecheck (tsc x2), build (tsup), unit tests
 #      (vitest).
 #
 # The Docker / real-Botpress-server integration tier is intentionally NOT run
@@ -60,17 +60,15 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
-          # The lockfile lives at the repo root: the SDK + all adapters /
-          # integrations share one pnpm workspace (see pnpm-workspace.yaml).
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: integrations/botpress/package.json
 
-      - name: Install deps (workspace-aware, frozen lockfile)
-        run: pnpm install --frozen-lockfile
-
-      - name: Build @spendguard/sdk (workspace dependency)
-        # The integration imports the SDK's runtime helpers; its dist/ is
-        # gitignored, so build it before typecheck/test resolve the package.
-        run: pnpm --filter @spendguard/sdk run build
+      - name: Install deps (standalone — not a workspace member)
+        # integrations/botpress was split out of the pnpm workspace 2026-06-22.
+        # --ignore-workspace resolves only its own devDeps + peers (@spendguard/sdk
+        # ^0.5.0, @botpress/sdk, @botpress/cli) from npm, so the @botpress/cli tree
+        # no longer pollutes the core SDK lockfile.
+        working-directory: integrations/botpress
+        run: pnpm install --ignore-workspace
 
       - name: Generate Botpress typings (offline codegen)
         # `bp build` regenerates the `.botpress/` module (typings +

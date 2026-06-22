@@ -18,6 +18,4 @@ packages:
   - "sdk/typescript-n8n"
   - "sdk/typescript-ag-ui"
   - "sdk/typescript-mastra"
-  - "integrations/botpress"
-  - "integrations/openclaw-provider-plugin"
   - "docs/site-v2"

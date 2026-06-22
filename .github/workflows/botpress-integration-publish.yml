@@ -71,19 +71,19 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: integrations/botpress/package.json
 
-      - name: Install deps (workspace-aware, frozen lockfile)
-        run: pnpm install --frozen-lockfile
-
-      - name: Build @spendguard/sdk (workspace dependency)
-        # The adapter typechecks against @spendguard/sdk's emitted .d.ts in
-        # dist/; the SDK dist is gitignored, so build it before typecheck.
-        run: pnpm --filter @spendguard/sdk run build
+      - name: Install deps (standalone — not a workspace member)
+        # integrations/botpress was split out of the pnpm workspace 2026-06-22.
+        # --ignore-workspace resolves its own deps + peers (@spendguard/sdk ^0.5.0,
+        # @botpress/sdk, @botpress/cli) from npm instead of the root workspace.
+        run: pnpm install --ignore-workspace
 
       - name: Generate Botpress typings (offline codegen)
         # `bp build` generates the gitignored `.botpress/` typings the runtime
         # imports as `import * as bp from '.botpress'`. Offline, no Cloud login.
+        # 5m step timeout — @botpress/cli can intermittently hang on the network.
+        timeout-minutes: 5
         run: pnpm exec bp build -y
 
       - name: Lint

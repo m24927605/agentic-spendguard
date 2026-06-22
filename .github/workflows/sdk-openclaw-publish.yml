@@ -5,9 +5,10 @@
 #         with bypass-2FA) authenticates the publish; --provenance attaches a
 #         signed build attestation from GitHub Actions.
 #
-# Source: integrations/openclaw-provider-plugin/ (a pnpm workspace member).
-# Depends on @spendguard/sdk, so the SDK is built first to emit the .d.ts the
-# typecheck resolves against. No lint step (the package ships no lint script).
+# Source: integrations/openclaw-provider-plugin/ — a STANDALONE package (NOT a
+# pnpm workspace member; split out 2026-06-22). It builds/typechecks against the
+# PUBLISHED @spendguard/sdk + openclaw peers, installed via `pnpm --ignore-workspace`.
+# No lint step (the package ships no lint script).
 
 name: Publish @spendguard/openclaw-provider-plugin to npm
 
@@ -47,15 +48,13 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: integrations/openclaw-provider-plugin/package.json
 
-      - name: Install deps (workspace-aware, frozen lockfile)
-        run: pnpm install --frozen-lockfile
-
-      - name: Build @spendguard/sdk (workspace dependency)
-        # The plugin typechecks against @spendguard/sdk's emitted .d.ts in
-        # dist/; the SDK dist is gitignored, so build it before typecheck.
-        run: pnpm --filter @spendguard/sdk run build
+      - name: Install deps (standalone — not a workspace member)
+        # integrations/openclaw-provider-plugin was split out of the pnpm
+        # workspace 2026-06-22. --ignore-workspace resolves its own deps + peers
+        # (@spendguard/sdk ^0.5.0, openclaw) from npm, not the root workspace.
+        run: pnpm install --ignore-workspace
 
       - name: Typecheck
         run: pnpm run typecheck

@@ -48,8 +48,9 @@ docs/launches/outreach-list.md
 
 .ait/
 
-# integrations/flowise builds STANDALONE (pnpm --ignore-workspace, split from the
-# root workspace 2026-06-22). Its lockfile pulls the Flowise host's heavy
-# flowise-components peer tree; keep it out of the repo so those CVEs never
-# re-enter a committed lockfile. CI resolves it fresh on each flowise-v* release.
-integrations/flowise/pnpm-lock.yaml
+# Integration host-plugins (flowise, botpress, openclaw-provider-plugin) build
+# STANDALONE (pnpm --ignore-workspace, split out of the root workspace 2026-06-22).
+# Their lockfiles pull the hosts' heavy peer trees (flowise-components, @botpress/cli,
+# openclaw); keep them out of the repo so those deps never re-enter a committed
+# lockfile. CI resolves each fresh on its release tag.
+integrations/*/pnpm-lock.yaml
