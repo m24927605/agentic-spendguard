@@ -6212,9 +6212,23 @@ async def run_beeai_mode() -> int:  # noqa: PLR0915
 
 
 async def run_letta_mode() -> int:  # noqa: PLR0915
-    """COV_D26: drive Letta Agent.step through SpendGuardLettaClient wrap."""
-    from types import SimpleNamespace
+    """COV_D26: drive a REAL Letta ``OpenAIClient.request_async`` through
+    SpendGuardLettaClient.
 
+    No fakes: the agent_real_letta runner ships letta, so an ImportError is
+    FATAL (return 8) — no duck-typed _FakeInner fallback. The shipped adapter
+    targeted letta 0.8's ``send_llm_request(request_data, llm_config, tools,
+    force_tool_use)``, but the overlay's ``letta>=0.8,<1.0`` resolves to
+    letta 0.16.8 whose ``LLMClientBase`` exposes ``request_async(request_data:
+    dict, llm_config) -> dict`` instead — the old method is gone, so the real
+    path always TypeError'd into the fake. We added a gated ``request_async``
+    to the adapter and drive that here against a real letta ``OpenAIClient``
+    (the same low-level call Agent.step makes; no heavyweight Agent factory).
+      * ALLOW — request_async reaches the counting-stub (post>pre); commit.
+      * DENY  — flip ONE estimator to a 2B raw claim → contract hard-cap-deny;
+        the wrapper raises DecisionDenied BEFORE inner.request_async, so the
+        provider HTTP never fires (counting flat).
+    """
     from spendguard import SpendGuardClient, new_uuid7
     from spendguard._proto.spendguard.common.v1 import common_pb2
 
@@ -6282,12 +6296,18 @@ async def run_letta_mode() -> int:  # noqa: PLR0915
     letta_run_context = hook_mod.run_context
     print("[demo] letta integration loaded → SpendGuardLettaClient ready")
 
+    # One estimator drives BOTH turns: a mutable flag flips a small ALLOW
+    # claim to a 2B raw claim that trips the demo contract's 1B
+    # hard-cap-deny rule (the SAME mechanism the other adapters use).
+    deny_state = {"deny": False}
+
     def estimate_claims(_request_data):
+        amount = "2000000000" if deny_state["deny"] else "500"
         return [
             common_pb2.BudgetClaim(
                 budget_id=budget_id,
                 unit=unit,
-                amount_atomic="500",
+                amount_atomic=amount,
                 direction=common_pb2.BudgetClaim.DEBIT,
                 window_instance_id=window_id,
             ),
@@ -6296,159 +6316,129 @@ async def run_letta_mode() -> int:  # noqa: PLR0915
     run_id = str(new_uuid7())
     print(f"[demo] letta run_id={run_id}")
 
-    real_letta_used = False
     try:
-        # Try to wire a real Letta `Agent` with SpendGuardLettaClient.
-        # Letta's `Agent.__init__` takes a deep config tree (memory
-        # backend, persona, agent_state) that requires a full sqlite
-        # bootstrap. For the demo we drive `wrapper.send_llm_request`
-        # directly through a real `OpenAIClient` — this exercises the
-        # same surface `Agent.step` would (Agent calls
-        # `inner.send_llm_request` once per internal reasoning step)
-        # without the heavyweight Agent factory setup. The wrapper
-        # itself is what D26 ships; the Agent layer is upstream
-        # plumbing.
-        from letta.llm_api.openai_client import OpenAIClient  # type: ignore[import-not-found]
-        from letta.schemas.llm_config import LLMConfig  # type: ignore[import-not-found]
-
-        # OpenAIClient subclasses LLMClientBase and reads
-        # OPENAI_API_KEY + OPENAI_BASE_URL from env at request time
-        # via litellm's openai client. The counting-stub serves
-        # /v1/chat/completions so no real API key is needed.
-        inner = OpenAIClient()
-        guarded = SpendGuardLettaClient(
-            inner=inner,
-            client=client,
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-            claim_estimator=estimate_claims,
+        from letta.llm_api.openai_client import (  # type: ignore[import-not-found]
+            OpenAIClient,
         )
-        # Build a minimal Letta-shaped request body. Letta normally
-        # generates this via `inner.build_request_data(messages, llm_config,
-        # tools)` — we mimic that shape directly.
-        llm_config = LLMConfig(
-            model="gpt-4o-mini",
-            model_endpoint_type="openai",
-            context_window=8192,
+        from letta.schemas.llm_config import (  # type: ignore[import-not-found]
+            LLMConfig,
         )
-        request_data = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": "You are a helpful demo agent."},
-                {"role": "user", "content": "Say hello in three words."},
-            ],
-            "stream": False,
-            "max_tokens": 64,
-        }
-        async with letta_run_context(LettaRunContext(run_id=run_id)):
-            result = await guarded.send_llm_request(
-                request_data, llm_config, tools=None, force_tool_use=False
-            )
-        usage = getattr(result, "usage", None)
-        total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
-        print(
-            f"[demo] agent_real_letta run completed: ALLOW path "
-            f"total_tokens={total_tokens} result_id={getattr(result, 'id', '')!r}"
-        )
-        real_letta_used = True
     except ImportError as exc:
+        # No fabrication: the agent_real_letta runner ships letta.
         print(
-            f"[demo] letta not importable ({exc}); using duck-typed driver path "
-            "(CI smoke gate).",
+            f"[demo] FATAL: letta not importable in the letta runner ({exc}); "
+            "refusing to fake a pass.",
             file=sys.stderr,
         )
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"[demo] Agent.send_llm_request raised "
-            f"{type(exc).__name__}: {exc}; falling back to duck-typed path.",
-            file=sys.stderr,
-        )
+        await client.close()
+        return 8
 
-    if not real_letta_used:
-        # Duck-typed driver — call wrapper.send_llm_request directly
-        # with a FakeInner. The wrapper has no letta dependency at
-        # runtime; only the demo's optional Agent layer does. This
-        # exercises the full PRE/POST lifecycle the way the real
-        # `Agent.step` would, with a FakeInner standing in for the
-        # OpenAIClient.
+    # OpenAIClient (a real letta LLMClientBase) reads OPENAI_API_KEY +
+    # OPENAI_BASE_URL from env (the overlay points both at the counting-stub).
+    # We gate its 0.16.x low-level ``request_async`` — the same provider call
+    # Agent.step makes — without the heavyweight Agent factory bootstrap.
+    inner = OpenAIClient()
+    guarded = SpendGuardLettaClient(
+        inner=inner,
+        client=client,
+        budget_id=budget_id,
+        window_instance_id=window_id,
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate_claims,
+    )
+    llm_config = LLMConfig(
+        model="gpt-4o-mini",
+        model_endpoint_type="openai",
+        model_endpoint="http://counting-stub:8765/v1",
+        context_window=8192,
+    )
 
-        class _FakeInner:
-            """Minimal duck-typed inner client matching the wrapper's needs."""
-
-            def __init__(self):
-                self.calls = 0
-
-            async def send_llm_request(
-                self, request_data, llm_config, tools=None,
-                force_tool_use=False, **_kwargs,
-            ):
-                self.calls += 1
-                # Shape mirrors letta's ChatCompletionResponse normalization.
-                return SimpleNamespace(
-                    id=f"chatcmpl-letta-stub-{self.calls}",
-                    content="hi from duck-typed inner",
-                    usage=SimpleNamespace(
-                        prompt_tokens=12,
-                        completion_tokens=20,
-                        total_tokens=32,
-                    ),
-                )
-
-            def send_llm_request_sync(self, *args, **kwargs):
-                """Sync sibling — not exercised by the demo, but kept for parity."""
-                raise NotImplementedError("FakeInner async-only")
-
-            # __getattr__-delegated surface used by `Agent`.
-            llm_config = SimpleNamespace(
-                model="gpt-4o-mini",
-                model_endpoint_type="openai",
-            )
-            provider = "openai-stub"
-
-            def build_request_data(self, *args, **kwargs):
-                return {"messages": [], "model": "gpt-4o-mini"}
-
-            def convert_response_to_chat_completion(self, response, *args, **kwargs):
-                return response
-
-        inner = _FakeInner()
-        guarded = SpendGuardLettaClient(
-            inner=inner,
-            client=client,
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-            claim_estimator=estimate_claims,
-        )
-        request_data = {
+    def _build_request(prompt: str) -> dict:
+        return {
             "model": "gpt-4o-mini",
             "messages": [
                 {"role": "system", "content": "You are a helpful demo agent."},
-                {"role": "user", "content": "Say hello in three words."},
+                {"role": "user", "content": prompt},
             ],
             "stream": False,
             "max_tokens": 64,
         }
-        llm_config_obj = SimpleNamespace(
-            model="gpt-4o-mini",
-            model_endpoint_type="openai",
-            context_window=8192,
+
+    # ── ALLOW turn ──────────────────────────────────────────────────
+    pre = _read_counting_stub_hits_sync()
+    async with letta_run_context(LettaRunContext(run_id=run_id)):
+        result = await guarded.request_async(
+            _build_request("Say hello in three words."), llm_config
         )
-        async with letta_run_context(LettaRunContext(run_id=run_id)):
-            result = await guarded.send_llm_request(
-                request_data, llm_config_obj, tools=None, force_tool_use=False
-            )
-        usage = getattr(result, "usage", None)
-        total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
+    post = _read_counting_stub_hits_sync()
+    if post <= pre:
         print(
-            f"[demo] agent_real_letta run completed: ALLOW path (stub) "
-            f"inner_calls={inner.calls} total_tokens={total_tokens}"
+            f"[demo] FATAL: letta ALLOW did not reach provider "
+            f"(counting-stub {pre} -> {post})",
+            file=sys.stderr,
         )
+        await client.close()
+        return 7
+    rid = result.get("id", "") if isinstance(result, dict) else getattr(result, "id", "")
+    print(
+        f"[demo] agent_real_letta ALLOW ok — real OpenAIClient.request_async "
+        f"reached provider (id={rid!r}); counting {pre} -> {post}"
+    )
+
+    # ── DENY turn (REAL — no fabrication) ───────────────────────────
+    # Flip the SAME estimator to a 2B raw claim → contract hard-cap-deny.
+    # SpendGuardLettaClient.request_async raises DecisionDenied from
+    # request_decision BEFORE inner.request_async, so the provider HTTP never
+    # fires. We call the wrapper directly, so the raise propagates cleanly; the
+    # load-bearing proof is the FLAT counting-stub.
+    from spendguard.errors import DecisionDenied
+    deny_state["deny"] = True
+    pre_deny = _read_counting_stub_hits_sync()
+    denied = False
+    async with letta_run_context(LettaRunContext(run_id=f"{run_id}:deny")):
+        try:
+            await guarded.request_async(_build_request("DENY test"), llm_config)
+        except DecisionDenied:
+            denied = True
+        except Exception as exc:  # noqa: BLE001 — deny may surface wrapped
+            cur, seen = exc, set()
+            while cur is not None and id(cur) not in seen:
+                seen.add(id(cur))
+                if isinstance(cur, DecisionDenied):
+                    denied = True
+                    break
+                cur = cur.__cause__ or cur.__context__
+            if not denied:
+                raise
+    post_deny = _read_counting_stub_hits_sync()
+    if not denied:
+        print(
+            "[demo] FATAL: letta DENY turn did NOT raise DecisionDenied "
+            "(real request_async completed without a SpendGuard block)",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 7
+    if post_deny != pre_deny:
+        print(
+            f"[demo] FATAL: letta DENY turn hit the provider "
+            f"(counting-stub {pre_deny} -> {post_deny})",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 7
+    print(
+        "[demo] agent_real_letta DENY ok — wrapper raised DecisionDenied "
+        f"BEFORE inner.request_async; counting-stub UNCHANGED "
+        f"({pre_deny} -> {post_deny})"
+    )
 
     await client.close()
+    print(
+        "[demo] agent_real_letta ALL steps PASS "
+        "(real ALLOW + real DENY via SpendGuardLettaClient.request_async, no fakes)"
+    )
     return 0
 
 

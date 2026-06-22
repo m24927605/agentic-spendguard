@@ -12,7 +12,11 @@
 --     request_decision before inner.send_llm_request fires)
 --   - commit_estimated >= 1 (ALLOW path: wrapper's POST commits with
 --     real ChatCompletionResponse.usage.total_tokens)
---   - denied_decision >= 0 (DENY variant optional — surfaces via the
+--   - denied_decision >= 1 (the live driver ALWAYS runs a real DENY turn: a
+--     real OpenAIClient.request_async with a 2B raw claim hits the contract
+--     hard-cap-deny rule; the wrapper raises DecisionDenied BEFORE
+--     inner.request_async so the counting-stub stays flat. No fabrication.)
+--   - (legacy note) DENY variant — surfaces via the
 --     wrapper raising DecisionDenied directly out of send_llm_request
 --     — no framework-side catch in LLMClientBase means the raise
 --     reaches the Agent.step caller cleanly; counting-stub hits stay
@@ -83,6 +87,13 @@ BEGIN
     END IF;
     IF v_commit < 1 THEN
         RAISE EXCEPTION 'COV_D26_GATE: ledger_transactions.commit_estimated >= 1 expected (ALLOW), got %', v_commit;
+    END IF;
+    -- The live driver now ALWAYS exercises a real DENY turn: a real
+    -- OpenAIClient.request_async with a 2B raw claim hits the contract
+    -- hard-cap-deny rule; the wrapper raises DecisionDenied before
+    -- inner.request_async and the sidecar records a denied_decision. No fab.
+    IF v_denied < 1 THEN
+        RAISE EXCEPTION 'COV_D26_GATE: ledger_transactions.denied_decision >= 1 expected (real DENY turn), got %', v_denied;
     END IF;
 
     RAISE NOTICE 'COV_D26 LEDGER OK: reserve=% commit=% denied=%',

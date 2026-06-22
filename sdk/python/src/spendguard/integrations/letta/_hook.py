@@ -245,6 +245,23 @@ def _extract_total_tokens(result: Any) -> int:
     """
     if result is None:
         return 0
+    # Letta 0.16.x's low-level ``request_async`` returns the RAW provider
+    # response as a ``dict`` (``result["usage"]["total_tokens"]``); the older
+    # ``send_llm_request`` returns a ``ChatCompletionResponse`` object
+    # (``result.usage.total_tokens``). Handle both.
+    if isinstance(result, dict):
+        usage_d = result.get("usage")
+        if not isinstance(usage_d, dict):
+            return 0
+        total = usage_d.get("total_tokens")
+        if isinstance(total, int) and total > 0:
+            return total
+        prompt = usage_d.get("prompt_tokens", 0) or 0
+        completion = usage_d.get("completion_tokens", 0) or 0
+        try:
+            return int(prompt) + int(completion)
+        except (TypeError, ValueError):
+            return 0
     usage = getattr(result, "usage", None)
     if usage is None:
         return 0
@@ -269,8 +286,11 @@ def _extract_provider_event_id(result: Any) -> str:
     Letta normalizes provider responses to an OpenAI-shaped envelope
     via ``convert_response_to_chat_completion``, so the top-level
     ``id`` field is the provider's request/response identifier
-    regardless of inner vendor.
+    regardless of inner vendor. Letta 0.16.x's ``request_async`` returns
+    the raw provider ``dict`` instead — handle both shapes.
     """
+    if isinstance(result, dict):
+        return str(result.get("id", "") or "")
     return str(getattr(result, "id", "") or "")
 
 
@@ -575,6 +595,116 @@ class SpendGuardLettaClient(_ClientBase):  # type: ignore[misc, valid-type]
         # request_decision raises; this guards an ALLOW-with-empty-
         # reservation-ids corner case the projector might still emit
         # in degenerate test setups).
+        total_tokens = _extract_total_tokens(result)
+        provider_event_id = _extract_provider_event_id(result)
+        if outcome.reservation_ids:
+            await self._client.emit_llm_call_post(
+                run_id=ctx.run_id,
+                step_id=step_id,
+                llm_call_id=llm_call_id,
+                decision_id=outcome.decision_id,
+                reservation_id=outcome.reservation_ids[0],
+                provider_reported_amount_atomic="",
+                estimated_amount_atomic=str(total_tokens),
+                unit=self._unit,
+                pricing=self._pricing,
+                provider_event_id=provider_event_id,
+                outcome="SUCCESS",
+            )
+        return result
+
+    # ─────────────────────────────────────────────────────────────────
+    # request_async — Letta 0.16.x low-level provider call (API drift).
+    # ─────────────────────────────────────────────────────────────────
+
+    async def request_async(
+        self,
+        request_data: Any,
+        llm_config: Any,
+    ) -> Any:
+        """Gate Letta 0.16.x's ``LLMClientBase.request_async``.
+
+        DRIFT: Letta 0.16 removed the old per-call
+        ``send_llm_request(request_data, llm_config, tools, force_tool_use)``
+        client surface this adapter was authored against (0.8.0). The
+        canonical low-level provider call is now
+        ``request_async(request_data: dict, llm_config) -> dict``. We gate it
+        exactly like ``send_llm_request``: PRE ``request_decision``
+        (fail-closed; DENY raises ``DecisionDenied`` BEFORE the inner call so
+        ZERO provider HTTP fires) → ``inner.request_async`` → POST
+        ``emit_llm_call_post``. The raw ``dict`` response is handled by the
+        dict-aware ``_extract_total_tokens`` / ``_extract_provider_event_id``.
+        """
+        ctx = current_run_context()
+        signature = _signature(request_data, llm_config, None, False)
+        llm_call_id = str(
+            derive_uuid_from_signature(signature, scope="llm_call_id")
+        )
+        decision_id = str(
+            derive_uuid_from_signature(signature, scope="decision_id")
+        )
+        step_id = f"{ctx.run_id}:letta-call:{signature[:16]}"
+        idempotency_key = derive_idempotency_key(
+            tenant_id=self._client.tenant_id,
+            session_id=self._client.session_id,
+            run_id=ctx.run_id,
+            step_id=step_id,
+            llm_call_id=llm_call_id,
+            trigger="LLM_CALL_PRE",
+        )
+        projected_claims = self._claim_estimator(request_data)
+        decision_context = {"integration": "letta"}
+        inner_type = type(self._inner).__name__
+        if inner_type:
+            decision_context["inner_client"] = inner_type
+
+        # PRE — fail-closed reserve (raises DecisionDenied on a STOP).
+        outcome: DecisionOutcome = await self._client.request_decision(
+            trigger="LLM_CALL_PRE",
+            run_id=ctx.run_id,
+            step_id=step_id,
+            llm_call_id=llm_call_id,
+            tool_call_id="",
+            decision_id=decision_id,
+            route=self._route,
+            projected_claims=projected_claims,
+            idempotency_key=idempotency_key,
+            projected_unit=self._unit,
+            decision_context_json=decision_context,
+        )
+
+        # Inner call — provider HTTP, ONLY if PRE allowed.
+        try:
+            result = await self._inner.request_async(request_data, llm_config)
+        except BaseException as exc:
+            if outcome.reservation_ids:
+                outcome_kind = _classify_exception(exc)
+                try:
+                    await self._client.emit_llm_call_post(
+                        run_id=ctx.run_id,
+                        step_id=step_id,
+                        llm_call_id=llm_call_id,
+                        decision_id=outcome.decision_id,
+                        reservation_id=outcome.reservation_ids[0],
+                        provider_reported_amount_atomic="",
+                        estimated_amount_atomic="0",
+                        unit=self._unit,
+                        pricing=self._pricing,
+                        provider_event_id="",
+                        outcome=outcome_kind,
+                    )
+                except Exception as post_exc:  # noqa: BLE001
+                    log.warning(
+                        "spendguard.integrations.letta: emit_llm_call_post "
+                        "failed on exception path (run_id=%s sig=%s err=%r) — "
+                        "reservation will TTL-sweep",
+                        ctx.run_id,
+                        signature[:8],
+                        post_exc,
+                    )
+            raise
+
+        # POST — success commit.
         total_tokens = _extract_total_tokens(result)
         provider_event_id = _extract_provider_event_id(result)
         if outcome.reservation_ids:
