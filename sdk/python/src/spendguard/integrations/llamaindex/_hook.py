@@ -352,6 +352,34 @@ def _resolve_serialized_model(payload: Mapping[str, Any]) -> str:
     return ""
 
 
+def _coerce_mapping(obj: Any) -> Mapping[str, Any] | None:  # noqa: ANN401
+    """Best-effort coerce a provider payload into a Mapping.
+
+    LlamaIndex providers set ``response.raw`` to heterogeneous shapes: a
+    plain dict (some providers), or — for ``llama-index-llms-openai`` on
+    openai-python v1 — the ``ChatCompletion`` **pydantic object** (and its
+    ``usage`` is a ``CompletionUsage`` object, not a dict). A Mapping-only
+    reader silently returns 0 tokens for the object shape, which then makes
+    the POST commit fail (``estimated_amount_atomic must be > 0``). Normalise
+    via ``model_dump`` / ``dict`` / ``to_dict`` so the real token counts are
+    read regardless of pydantic-vs-dict response shape.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, Mapping):
+        return obj
+    for attr in ("model_dump", "dict", "to_dict"):
+        fn = getattr(obj, attr, None)
+        if callable(fn):
+            try:
+                d = fn()
+            except Exception:  # noqa: BLE001 — fall through to next strategy
+                continue
+            if isinstance(d, Mapping):
+                return d
+    return None
+
+
 def _extract_total_tokens(response: Any) -> int:  # noqa: ANN401 — provider shapes vary
     """Pull total token count from a LlamaIndex provider response.
 
@@ -363,11 +391,11 @@ def _extract_total_tokens(response: Any) -> int:  # noqa: ANN401 — provider sh
       4. Bedrock Converse: ``response.raw["usage"]["inputTokens"] + ["outputTokens"]``
       5. Default: 0.
     """
-    raw = getattr(response, "raw", None)
+    raw = _coerce_mapping(getattr(response, "raw", None))
     if raw is None:
         return 0
     if isinstance(raw, Mapping):
-        usage = raw.get("usage")
+        usage = _coerce_mapping(raw.get("usage")) or raw.get("usage")
         if isinstance(usage, Mapping):
             # 1) OpenAI universal total
             total = usage.get("total_tokens")

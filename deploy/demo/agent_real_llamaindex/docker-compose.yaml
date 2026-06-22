@@ -44,6 +44,16 @@
 name: spendguard-demo
 
 services:
+  # ── sidecar peer-uid override ─────────────────────────────────────────
+  # The llamaindex-runner connects to the adapter UDS as root (uid 0) to
+  # write its named-volume venv; the sidecar SO_PEERCRED gate defaults to
+  # its own uid (65532) and would reject root ("Socket closed"). Accept
+  # root for this local-UDS demo (production uses mTLS+SPIFFE, never this
+  # path). Matches the override every other root-runner overlay already
+  # carries (mastra_processor, openai_agents_ts, n8n_real, …).
+  sidecar:
+    environment:
+      SPENDGUARD_SIDECAR_ADAPTER_EXPECTED_PEER_UID: "0"
   # ── counting-stub ────────────────────────────────────────────────────
   # Mock OpenAI provider on /v1/chat/completions. LlamaIndex's `OpenAI`
   # LLM (used in the live `agent_real_llamaindex` variant) hits that

@@ -3503,6 +3503,33 @@ async def _read_counting_stub_hits(client: Any) -> int:
     return int(r.json()["calls"])
 
 
+def _read_counting_stub_hits_sync() -> int:
+    """Stdlib (urllib) read of `GET counting-stub:8765/_count` for runners
+    driving a SYNC framework API (e.g. LlamaIndex ``query_engine.query``).
+
+    Robust to the per-overlay /_count JSON shape: different counting-stub
+    overlays return either ``{"calls": N}`` or ``{"_counting_stub_hits": N}``
+    and also set the ``x-counting-stub-hits`` response header. We try all
+    three rather than assume one — a wrong key would silently read 0 and
+    fabricate a "counter unchanged" pass."""
+    import json
+    import urllib.request
+
+    with urllib.request.urlopen(f"{_COUNTING_STUB_URL}/_count", timeout=5) as resp:
+        raw = resp.read().decode("utf-8")
+        hdr = resp.headers.get("x-counting-stub-hits")
+    try:
+        body = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        body = {}
+    for key in ("calls", "_counting_stub_hits"):
+        if key in body:
+            return int(body[key])
+    if hdr is not None:
+        return int(hdr)
+    raise RuntimeError(f"counting-stub /_count: no hit count in body={raw!r} header={hdr!r}")
+
+
 async def run_envoy_extproc_mode() -> int:
     """3 steps (ALLOW + DENY + STREAM) per slice doc + design §3.5."""
     import httpx
@@ -6543,23 +6570,15 @@ async def run_llamaindex_mode() -> int:  # noqa: PLR0915
     snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
 
     print(f"[demo] connecting to sidecar at {socket_path}")
-    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
-    client: SpendGuardClient | None = None
-    last_err: BaseException | None = None
-    while time.monotonic() < deadline:
-        try:
-            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
-            await c.connect()
-            await c.handshake()
-            client = c
-            break
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            await asyncio.sleep(1)
-    if client is None:
-        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
-        return 3
-    print(f"[demo] handshake ok session_id={client.session_id}")
+    # LlamaIndex is a SYNC host: SpendGuardLlamaIndexHandler bridges the sync
+    # callback into the async client on a private background-thread event
+    # loop. grpc.aio channels are loop-bound, so the client MUST be connected
+    # on THAT bridge loop, not run_demo's main loop — otherwise every
+    # request_decision fails with "Future attached to a different loop" and
+    # the real provider path silently falls back to a fake. We create the
+    # client UNCONNECTED here and connect it through the handler's bridge
+    # once the handler (and thus the bridge) exists, below.
+    client = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
 
     unit = common_pb2.UnitRef(
         unit_id=unit_id,
@@ -6599,12 +6618,19 @@ async def run_llamaindex_mode() -> int:  # noqa: PLR0915
     # Reservation estimator: conservative 500-atomic floor (well above
     # the counting-stub's 42-token canned response, below the demo
     # contract cap).
+    # A single handler drives BOTH legs: a mutable flag flips the estimate
+    # from a small ALLOW claim to a 2,000,000,000-atomic DENY claim, so one
+    # bridge loop + one client connection serve both turns. (Two handlers
+    # would spin up two bridge loops; the client can only live on one.)
+    deny_state = {"deny": False}
+
     def estimate_claims(_payload: Any) -> list[Any]:  # noqa: ANN401
+        amount = "2000000000" if deny_state["deny"] else "500"
         return [
             common_pb2.BudgetClaim(
                 budget_id=budget_id,
                 unit=unit,
-                amount_atomic="500",
+                amount_atomic=amount,
                 direction=common_pb2.BudgetClaim.DEBIT,
                 window_instance_id=window_id,
             ),
@@ -6619,6 +6645,20 @@ async def run_llamaindex_mode() -> int:  # noqa: PLR0915
         claim_estimator=estimate_claims,
     )
 
+    # Connect the client ON the handler's bridge loop (see the SYNC-host note
+    # above) so every request_decision runs on the same loop as the grpc
+    # channel. bridge.run() schedules the coroutine on the bridge thread's
+    # loop and blocks for the result.
+    bridge = handler._bridge  # noqa: SLF001 — demo wiring for the sync host
+    try:
+        bridge.run(client.connect())
+        bridge.run(client.handshake())
+    except Exception as e:  # noqa: BLE001
+        print(f"[demo] FATAL: handshake failed: {e}", file=sys.stderr)
+        handler.close()
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
     run_id = str(new_uuid7())
     print(f"[demo] llamaindex run_id={run_id} mode={demo_mode}")
 
@@ -6628,6 +6668,7 @@ async def run_llamaindex_mode() -> int:  # noqa: PLR0915
     # Settings.callback_manager + VectorStoreIndex flow needs the
     # actual package.
     real_used = False
+    using_real_openai = False
     try:
         from llama_index.core import (  # type: ignore[import-not-found]
             Document,
@@ -6657,10 +6698,23 @@ async def run_llamaindex_mode() -> int:  # noqa: PLR0915
                     OpenAI as _LlamaOpenAI,
                 )
 
-                Settings.llm = _LlamaOpenAI(model="gpt-4o-mini")
+                # llama-index-llms-openai reads `api_base` (env OPENAI_API_BASE),
+                # NOT the openai SDK's OPENAI_BASE_URL — so without an explicit
+                # api_base it hits REAL api.openai.com and 401s on the stub key
+                # (this is one reason the prior demo silently fell back to a
+                # fake). Point it explicitly at the counting-stub.
+                _stub_base = os.environ.get(
+                    "OPENAI_BASE_URL", "http://counting-stub:8765/v1"
+                )
+                Settings.llm = _LlamaOpenAI(
+                    model="gpt-4o-mini",
+                    api_base=_stub_base,
+                    api_key=os.environ.get("OPENAI_API_KEY", "sk-spendguard-demo-stub"),
+                )
+                using_real_openai = True
                 print(
-                    "[demo] llamaindex using llama-index-llms-openai "
-                    "(counting-stub on /v1/chat/completions)"
+                    f"[demo] llamaindex using llama-index-llms-openai "
+                    f"(counting-stub at {_stub_base})"
                 )
             except ImportError as exc:
                 print(
@@ -6681,64 +6735,79 @@ async def run_llamaindex_mode() -> int:  # noqa: PLR0915
         )
         real_used = True
 
-        # ── DENY turn ───────────────────────────────────────────────
-        # The DENY turn is exercised by setting the contract cap to 0
-        # (out-of-band by the demo harness). The runner-side observation
-        # asserts the handler raises BEFORE Settings.llm dispatches its
-        # underlying HTTP — verified by the unchanged counting-stub
-        # hit counter on the DENY turn (when using llama-index-llms-openai).
-        # The library-mode path here can't force a sidecar STOP without
-        # a budget reset, so we surface the canonical log line
-        # unconditionally — the verify SQL gate asserts the actual
-        # ledger denied_decision count.
-        print(
-            "[demo] agent_real_llamaindex run completed: DENY path "
-            "(model not called)"
-        )
+        # ── DENY turn (REAL — no fabrication) ───────────────────────
+        # Genuinely bust the budget: flip the SAME handler's estimator to a
+        # 2,000,000,000-atomic claim (deny_state["deny"]=True) which trips
+        # the demo contract's 1B hard-cap-deny rule, so the sidecar returns
+        # STOP and the handler raises SpendGuardLlamaIndexDenied from
+        # on_event_start BEFORE Settings.llm dispatches any HTTP. We drive a
+        # REAL query_engine.query() through the real LlamaIndex pipeline — no
+        # SimpleNamespace, no hollow print, no second bridge loop. Proof is
+        # observable: the real query raises the deny, and (with
+        # llama-index-llms-openai) the counting-stub hit counter is UNCHANGED
+        # across the DENY turn.
+        deny_state["deny"] = True
+        qe_deny = index.as_query_engine()
+
+        pre_deny = _read_counting_stub_hits_sync() if using_real_openai else None
+        denied = False
+        try:
+            qe_deny.query("What is the budget cap on the DENY turn?")
+        except SpendGuardLlamaIndexDenied:
+            denied = True
+        except Exception as exc:  # noqa: BLE001 — deny may surface wrapped
+            cause = getattr(exc, "__cause__", None)
+            if isinstance(cause, SpendGuardLlamaIndexDenied) or "Denied" in type(exc).__name__:
+                denied = True
+            else:
+                raise
+
+        if not denied:
+            print(
+                "[demo] FATAL: llamaindex DENY turn did NOT raise "
+                "SpendGuardLlamaIndexDenied (gate did not fire)",
+                file=sys.stderr,
+            )
+            bridge.run(client.close())
+            handler.close()
+            return 7
+        if using_real_openai:
+            post_deny = _read_counting_stub_hits_sync()
+            if post_deny != pre_deny:
+                print(
+                    f"[demo] FATAL: llamaindex DENY turn hit the provider "
+                    f"(counting-stub {pre_deny} -> {post_deny})",
+                    file=sys.stderr,
+                )
+                bridge.run(client.close())
+                handler.close()
+                return 7
+            print(
+                "[demo] agent_real_llamaindex DENY turn ok — real "
+                "query_engine.query() raised SpendGuardLlamaIndexDenied; "
+                f"counting-stub UNCHANGED ({pre_deny} -> {post_deny})"
+            )
+        else:
+            print(
+                "[demo] agent_real_llamaindex DENY turn ok — real "
+                "query_engine.query() raised SpendGuardLlamaIndexDenied "
+                "(MockLLM fallback; no provider counter to assert)"
+            )
     except ImportError as exc:
+        # No fabrication: the agent_real_llamaindex runner image ships
+        # llama-index-core, so an import failure here is a REAL runner
+        # defect, not a "smoke gate" to paper over with a duck-typed fake.
         print(
-            f"[demo] llama-index-core not importable ({exc}); "
-            "using duck-typed driver path (CI smoke gate).",
+            f"[demo] FATAL: llama-index-core not importable in the llamaindex "
+            f"runner ({exc}); refusing to fake a pass.",
             file=sys.stderr,
         )
+        bridge.run(client.close())
+        handler.close()
+        return 8
 
-    if not real_used:
-        # Duck-typed driver — mirrors the SLICE 4 unit tests. Walk one
-        # PRE/POST cycle through the handler directly so the runner
-        # still proves the canonical sidecar lifecycle.
-        from types import SimpleNamespace
-        payload_start = {
-            "messages": [{"role": "user", "content": "What is the budget cap?"}],
-            "serialized": {"model": "gpt-4o-mini", "class_name": "OpenAI"},
-        }
-        # Use the string sentinel the handler falls back to when
-        # llama-index-core isn't installed.
-        llm_event = "llm"
-        handler.on_event_start(
-            llm_event, payload=payload_start, event_id="demo-evt-1"
-        )
-        response_obj = SimpleNamespace(
-            raw={
-                "id": "chatcmpl-demo-stub",
-                "usage": {
-                    "prompt_tokens": 12,
-                    "completion_tokens": 30,
-                    "total_tokens": 42,
-                },
-            }
-        )
-        payload_end = {"response": response_obj}
-        handler.on_event_end(
-            llm_event, payload=payload_end, event_id="demo-evt-1"
-        )
-        print("[demo] agent_real_llamaindex run completed: ALLOW path (stub)")
-        print(
-            "[demo] agent_real_llamaindex run completed: DENY path "
-            "(model not called)"
-        )
-
+    bridge.run(client.close())
     handler.close()
-    await client.close()
     return 0
 
 

@@ -85,6 +85,13 @@ BEGIN
     IF v_commit < 1 THEN
         RAISE EXCEPTION 'COV_D27_GATE: ledger_transactions.commit_estimated >= 1 expected (ALLOW), got %', v_commit;
     END IF;
+    -- The live driver now ALWAYS exercises a real DENY turn (a real
+    -- query_engine.query() with a 2B claim raises SpendGuardLlamaIndexDenied
+    -- before the provider HTTP), so a denied_decision row MUST be present.
+    -- No fabrication: if the DENY did not land durably, fail the gate.
+    IF v_denied < 1 THEN
+        RAISE EXCEPTION 'COV_D27_GATE: ledger_transactions.denied_decision >= 1 expected (real DENY turn), got %', v_denied;
+    END IF;
 
     RAISE NOTICE 'COV_D27 LEDGER OK: reserve=% commit=% denied=%',
         v_reserve, v_commit, v_denied;
