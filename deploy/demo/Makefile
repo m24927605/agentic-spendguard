@@ -20,6 +20,12 @@
 #   DEMO_MODE=session_reservation
 #                           COV_D41S: session-scoped reserve/stream/release
 #                           substrate demo + strict audit ingest gate
+#   DEMO_MODE=deny_conformance
+#                           Parametrized deny-conformance harness: every
+#                           in-image adapter (pydantic_ai, langchain,
+#                           openai_agents, agt, litellm) must raise
+#                           DecisionDenied on a 2B budget-bust before any
+#                           provider call. No keys; verify_step_deny_conformance.
 
 COMPOSE := docker compose -f compose.yaml
 # Default to "decision" mode (Handshake + RequestDecision +
@@ -769,6 +775,20 @@ else ifeq ($(DEMO_MODE),approval_hot_reload)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    control-plane outbox-forwarder
+else ifeq ($(DEMO_MODE),deny_conformance)
+	@echo "[demo] DEMO_MODE=deny_conformance → in-image deny-conformance harness."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder (audit chain drain)."
+	@echo "[demo]   Runner drives every framework installed in the demo image"
+	@echo "[demo]   (pydantic_ai, langchain, openai_agents, agt, litellm) through"
+	@echo "[demo]   a 2B budget-busting claim and asserts each adapter raises"
+	@echo "[demo]   DecisionDenied BEFORE any provider call. No provider keys."
+	@echo "[demo]   The other ~11 adapters pin incompatible framework versions"
+	@echo "[demo]   and are deny-tested in their own runner overlays."
+	$(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder
 else
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
@@ -1139,6 +1159,9 @@ else ifeq ($(DEMO_MODE),ttl_sweep)
 else ifeq ($(DEMO_MODE),deny)
 	@echo "[demo] verifying Phase 3 wedge (contract evaluator STOP path)..."
 	@$(MAKE) demo-verify-deny
+else ifeq ($(DEMO_MODE),deny_conformance)
+	@echo "[demo] verifying deny-conformance harness (durable pure-deny ledger state)..."
+	@$(MAKE) demo-verify-deny-conformance
 else ifeq ($(DEMO_MODE),approval)
 	@echo "[demo] verifying Round-2 #9 part 2 (REQUIRE_APPROVAL → resolve → resume)..."
 	@$(MAKE) demo-verify-approval
@@ -1271,6 +1294,10 @@ demo-verify-session-reservation:
 demo-verify-deny:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_deny.sql
 	@echo "[demo] Phase 3 DENY verification done"
+
+demo-verify-deny-conformance:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_deny_conformance.sql
+	@echo "[demo] deny-conformance ledger verification done"
 
 demo-verify-m1-runaway-loop:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \

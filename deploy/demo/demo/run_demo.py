@@ -794,6 +794,8 @@ async def main() -> int:
         return await run_ttl_sweep_mode()
     if DEMO_MODE == "deny":
         return await run_deny_mode()
+    if DEMO_MODE == "deny_conformance":
+        return await run_deny_conformance_mode()
     if DEMO_MODE == "approval":
         return await run_approval_mode()
     if DEMO_MODE == "approval_hot_reload":
@@ -1730,6 +1732,85 @@ async def run_langgraph_mode() -> int:
 # Deny mode (Phase 3 wedge): contract evaluator returns STOP for a claim
 # above the bundle's hard-cap rule.
 # ---------------------------------------------------------------------------
+
+
+async def run_deny_conformance_mode() -> int:
+    """Deny-conformance harness — every registered in-process gating adapter
+    MUST raise DecisionDenied on a 2B budget-busting claim, BEFORE any provider
+    call. Adapter-agnostic, no provider keys, no real frameworks (fake requests).
+    See deny_conformance.py for the per-adapter shims + the registry.
+    """
+    import deny_conformance
+
+    from spendguard import SpendGuardClient
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
+    unit = common_pb2.UnitRef(
+        unit_id=unit_id, token_kind="output_token", model_family="gpt-4"
+    )
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+
+    n = len(deny_conformance.REGISTRY)
+    print(f"[demo] deny-conformance: driving {n} adapters through a 2B budget-bust")
+    passed, results = await deny_conformance.run_conformance(
+        client,
+        budget_id=budget_id,
+        window_instance_id=window_id,
+        unit=unit,
+        pricing=pricing,
+    )
+    await client.close()
+
+    print("[demo] === DENY-CONFORMANCE RESULTS ===")
+    for name, status, detail in results:
+        print(f"[demo]   {status:<12} {name:<16} {detail}")
+    total = len(results)
+    print(
+        f"[demo] {passed}/{total} adapters enforced DENY before the provider call"
+    )
+    if passed != total:
+        failed = [n for n, st, _ in results if st != "PASS"]
+        print(
+            f"[demo] FATAL: {total - passed} adapter(s) did NOT enforce DENY: {failed}",
+            file=sys.stderr,
+        )
+        return 1
+    print("[demo] deny_conformance ALL adapters PASS")
+    return 0
 
 
 async def run_deny_mode() -> int:
