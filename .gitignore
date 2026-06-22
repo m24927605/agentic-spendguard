@@ -24,11 +24,13 @@ docs/site/site/
 # when an operator runs `cargo test` outside Docker.
 target/
 services/*/target/
-services/*/Cargo.lock
 crates/*/target/
-crates/*/Cargo.lock
 benchmarks/*/target/
-benchmarks/*/Cargo.lock
+# NOTE: per-crate Cargo.lock is intentionally TRACKED (it used to be ignored
+# here, alongside target/). Service Docker images build with `cargo build` and
+# no committed lock means deps resolve fresh every time — which let a broken
+# upstream "latest" (time 0.3.50) break CI non-reproducibly. Committing locks
+# pins the build to known-good versions.
 proto/google
 *.swp
 *.swo
