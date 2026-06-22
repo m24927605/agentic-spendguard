@@ -62,6 +62,20 @@ BUDGET_ID = os.environ.get(
 WINDOW_INSTANCE_ID = os.environ.get(
     "SPENDGUARD_WINDOW_INSTANCE_ID", "55555555-5555-4555-8555-555555555555",
 )
+# The unit MUST be a UUID (the ledger ledger_units.unit_id column is uuid) —
+# the old "usd_micros" literal made the commit fail with "invalid input
+# syntax for type uuid". The full pricing tuple (snapshot hash / fx / unit
+# conversion) is sourced from the bundles runtime.env by the overlay so the
+# commit's PricingFreeze matches the contract bundle the sidecar loaded.
+UNIT_ID = os.environ.get(
+    "SPENDGUARD_UNIT_ID", "66666666-6666-4666-8666-666666666666",
+)
+PRICING_VERSION = os.environ.get("SPENDGUARD_PRICING_VERSION", "demo-pricing-v1")
+FX_RATE_VERSION = os.environ.get("SPENDGUARD_FX_RATE_VERSION", "demo-fx-v1")
+UNIT_CONVERSION_VERSION = os.environ.get(
+    "SPENDGUARD_UNIT_CONVERSION_VERSION", "demo-units-v1",
+)
+PRICE_SNAPSHOT_HASH_HEX = os.environ.get("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX", "")
 COUNTING_STUB_URL = os.environ.get(
     "SPENDGUARD_COUNTING_STUB_URL", "http://counting-stub:8765",
 )
@@ -249,17 +263,33 @@ async def _mock_main() -> int:
 
 
 async def _real_main() -> int:
-    """End-to-end against the sidecar UDS + counting-stub via httpx."""
+    """End-to-end against the sidecar UDS + counting-stub via a REAL MAF
+    ``OpenAIChatClient.get_response(messages, middleware=[SpendGuardMiddleware])``
+    — no MagicMock, no hand-rolled ``call_next``, no fabricated ``ChatResponse``.
+    MAF invokes the middleware's ``process(context, call_next)`` with its OWN
+    real chat call as ``call_next``; the SpendGuard gate runs PRE, the real
+    OpenAIChatClient HTTP hits the counting-stub on ALLOW, and on DENY the gate
+    raises BEFORE that HTTP (counter unchanged).
+    """
     print(
         f"[demo] maf_python driver: --real mode socket={SOCKET_PATH} "
         f"tenant={TENANT_ID} counting_stub={COUNTING_STUB_URL}",
     )
 
     import httpx
-    from agent_framework import ChatContext, ChatResponse, Message
+    from agent_framework import Message
+    # OpenAIChatCompletionClient targets the /v1/chat/completions API (the
+    # counting-stub's shape); the default OpenAIChatClient targets the newer
+    # /v1/responses API which the stub does not serve (404).
+    from agent_framework.openai import OpenAIChatCompletionClient
+    from openai import AsyncOpenAI
 
     from spendguard.client import SpendGuardClient
-    from spendguard.errors import DecisionDenied, SidecarUnavailable
+    from spendguard.errors import (
+        DecisionDenied,
+        SidecarUnavailable,
+        SpendGuardError,
+    )
     from spendguard.integrations.agent_framework import (
         RunContext,
         SpendGuardAgentFrameworkOptions,
@@ -268,9 +298,17 @@ async def _real_main() -> int:
     )
     from spendguard._proto.spendguard.common.v1 import common_pb2
 
+    if not PRICE_SNAPSHOT_HASH_HEX:
+        print(
+            "[demo] FATAL: SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX not set — the "
+            "overlay must source the bundles runtime.env so the commit's "
+            "PricingFreeze matches the contract bundle.",
+            file=sys.stderr,
+        )
+        return 7
+
     # 1) Wait for the sidecar UDS to be visible (Docker volume race).
     deadline = asyncio.get_event_loop().time() + HANDSHAKE_TIMEOUT_S
-    last_err: str = ""
     while asyncio.get_event_loop().time() < deadline:
         if os.path.exists(SOCKET_PATH):
             print(f"[demo] sidecar UDS visible at {SOCKET_PATH}")
@@ -279,7 +317,7 @@ async def _real_main() -> int:
     else:
         print(
             f"[demo] FATAL: sidecar UDS at {SOCKET_PATH} did not appear "
-            f"within {HANDSHAKE_TIMEOUT_S:.0f}s: {last_err}",
+            f"within {HANDSHAKE_TIMEOUT_S:.0f}s",
             file=sys.stderr,
         )
         return 7
@@ -295,7 +333,6 @@ async def _real_main() -> int:
     print(f"[demo] handshake ok session_id={client.session_id}")
 
     try:
-        # 3) Wire the middleware.
         options = SpendGuardAgentFrameworkOptions(
             tenant_id=TENANT_ID,
             budget_id=BUDGET_ID,
@@ -303,21 +340,33 @@ async def _real_main() -> int:
             sidecar_socket_path=SOCKET_PATH,
         )
 
+        # UUID unit (commit lands in the uuid ledger_units column) + the full
+        # pricing tuple from the bundles runtime.env.
+        unit = common_pb2.UnitRef(
+            unit_id=UNIT_ID, token_kind="output_token", model_family="gpt-4"
+        )
+        pricing = common_pb2.PricingFreeze(
+            pricing_version=PRICING_VERSION,
+            price_snapshot_hash=bytes.fromhex(PRICE_SNAPSHOT_HASH_HEX),
+            fx_rate_version=FX_RATE_VERSION,
+            unit_conversion_version=UNIT_CONVERSION_VERSION,
+        )
+
+        # One estimator drives every turn via a mutable flag. ALLOW claims a
+        # small 100 atomic (so ALLOW + ALLOW2 both fit the 500-atomic demo
+        # budget); DENY flips to a 2B raw claim through the MIDDLEWARE's gate
+        # (NOT a counting-stub body override) so the sidecar's contract
+        # evaluator sees the overflow and blocks BEFORE call_next.
+        deny_state = {"deny": False}
+
         def _claim_estimator(_messages):
-            # Minimal projected claim — the sidecar's contract evaluator
-            # owns the actual budget arithmetic. The DENY step overrides
-            # via spendguard_estimate_override on the counting-stub
-            # request body, mirroring the inngest_agent_kit / openai_agents_ts
-            # demos.
+            amount = "2000000000" if deny_state["deny"] else "100"
             claim = common_pb2.BudgetClaim()
             claim.budget_id = BUDGET_ID
             claim.window_instance_id = WINDOW_INSTANCE_ID
-            claim.amount_atomic = "1000000"
-            claim.unit.unit_id = "usd_micros"
+            claim.amount_atomic = amount
+            claim.unit.unit_id = UNIT_ID
             return [claim]
-
-        unit = common_pb2.UnitRef(unit_id="usd_micros")
-        pricing = common_pb2.PricingFreeze(pricing_version="demo-pricing-v1")
 
         middleware = SpendGuardMiddleware(
             client=client,
@@ -327,127 +376,109 @@ async def _real_main() -> int:
             claim_estimator=_claim_estimator,
         )
 
-        # 4) Define a helper that drives one MAF call through the middleware.
-        async with httpx.AsyncClient(
-            base_url=COUNTING_STUB_URL, timeout=30.0,
-        ) as http:
+        # Real MAF chat client pointed at the counting-stub via an explicit
+        # AsyncOpenAI (guarantees base_url overrides the public endpoint).
+        chat_client = OpenAIChatCompletionClient(
+            model="gpt-4o-mini",
+            async_client=AsyncOpenAI(
+                api_key="sk-spendguard-demo-stub",
+                base_url=f"{COUNTING_STUB_URL}/v1",
+            ),
+        )
 
-            async def _read_counter() -> int:
-                r = await http.get("/_count")
+        async def _read_counter() -> int:
+            async with httpx.AsyncClient(
+                base_url=COUNTING_STUB_URL, timeout=30.0
+            ) as h:
+                r = await h.get("/_count")
                 r.raise_for_status()
                 return int(r.json()["calls"])
 
-            async def _run_step(prompt: str, deny: bool = False) -> bool:
-                """Drive ALLOW / DENY iteration. Returns True on CONTINUE."""
-                ctx = ChatContext(
-                    client=MagicMock(),
-                    messages=[Message(role="user", contents=[prompt])],
-                    options={"model": "gpt-4o-mini"},
-                )
-                response = ChatResponse(
-                    messages=[Message(role="assistant", contents=["ok"])],
-                    response_id="resp-real",
-                    model="gpt-4o-mini",
-                    usage_details={
-                        "input_token_count": 5,
-                        "output_token_count": 7,
-                        "total_token_count": 12,
-                    },
-                )
-
-                async def _call_next() -> None:
-                    # Hit the counting stub on CONTINUE only; the
-                    # middleware throws DecisionDenied before reaching
-                    # here on STOP.
-                    body: dict[str, Any] = {
-                        "model": "gpt-4o-mini",
-                        "messages": [{"role": "user", "content": prompt}],
-                    }
-                    if deny:
-                        body["spendguard_estimate_override"] = "2000000000"
-                    r = await http.post(
-                        "/v1/chat/completions",
-                        json=body,
-                        headers={
-                            "authorization": "Bearer demo-counting-stub",
-                        },
-                    )
-                    r.raise_for_status()
-                    ctx.result = response
-
-                try:
-                    await middleware.process(ctx, _call_next)
+        def _is_block(exc: BaseException) -> bool:
+            # Fail-closed: a contract hard-cap STOP raises DecisionDenied; a
+            # large-claim/approval or budget-floor STOP surfaces as a
+            # SpendGuardError. Either is a genuine block (the counter-flat
+            # assertion + the ALLOW positive control rule out an outage). Walk
+            # the cause/context chain — MAF may wrap the middleware error.
+            seen: set[int] = set()
+            cur: BaseException | None = exc
+            while cur is not None and id(cur) not in seen:
+                seen.add(id(cur))
+                if isinstance(cur, (DecisionDenied, SpendGuardError)):
                     return True
-                except DecisionDenied as exc:
-                    print(
-                        f"[demo] caught DecisionDenied: {exc}",
-                    )
-                    return False
-                except SidecarUnavailable:
-                    raise
+                cur = cur.__cause__ or cur.__context__
+            return False
 
-            async with run_context(RunContext(run_id="run-real-1")):
-                # ALLOW
-                print("[demo] (1) ALLOW step — small message within budget")
-                pre_allow = await _read_counter()
-                ok1 = await _run_step("hi from python")
-                post_allow = await _read_counter()
-                if not ok1:
-                    print(
-                        "[demo] FATAL: ALLOW step raised DecisionDenied "
-                        "unexpectedly",
-                        file=sys.stderr,
-                    )
-                    return 7
-                if post_allow != pre_allow + 1:
-                    print(
-                        f"[demo] FATAL ALLOW: counting-stub pre={pre_allow} "
-                        f"post={post_allow} (expected +1)",
-                        file=sys.stderr,
-                    )
-                    return 7
+        async def _drive(prompt: str):
+            return await chat_client.get_response(
+                messages=[Message(role="user", contents=[prompt])],
+                middleware=[middleware],
+            )
 
-                # DENY
-                print("[demo] (2) DENY step — forcing hard-cap overflow")
-                pre_deny = post_allow
-                ok2 = await _run_step(
-                    "trigger-deny: please block me", deny=True,
+        async with run_context(RunContext(run_id="run-real-1")):
+            # ── (1) ALLOW ───────────────────────────────────────────────
+            print("[demo] (1) ALLOW step — small message within budget")
+            pre_allow = await _read_counter()
+            await _drive("hi from python")
+            post_allow = await _read_counter()
+            if post_allow != pre_allow + 1:
+                print(
+                    f"[demo] FATAL ALLOW: counting-stub pre={pre_allow} "
+                    f"post={post_allow} (expected +1)",
+                    file=sys.stderr,
                 )
-                post_deny = await _read_counter()
-                if ok2:
-                    print(
-                        "[demo] FATAL DENY: middleware did NOT raise "
-                        "DecisionDenied",
-                        file=sys.stderr,
-                    )
-                    return 7
-                if post_deny != pre_deny:
-                    print(
-                        f"[demo] FATAL DENY INV-1.6: counting-stub "
-                        f"pre={pre_deny} post={post_deny} (expected 0)",
-                        file=sys.stderr,
-                    )
-                    return 7
+                return 7
+            print(f"[demo] ALLOW ok — provider reached {pre_allow} -> {post_allow}")
 
-                # ALLOW2
-                print("[demo] (3) ALLOW2 step — second small message within budget")
-                pre_allow2 = post_deny
-                ok3 = await _run_step("another hi")
-                post_allow2 = await _read_counter()
-                if not ok3:
-                    print(
-                        "[demo] FATAL ALLOW2: raised DecisionDenied "
-                        "unexpectedly",
-                        file=sys.stderr,
-                    )
-                    return 7
-                if post_allow2 != pre_allow2 + 1:
-                    print(
-                        f"[demo] FATAL ALLOW2: counting-stub "
-                        f"pre={pre_allow2} post={post_allow2} (expected +1)",
-                        file=sys.stderr,
-                    )
-                    return 7
+            # ── (2) DENY ────────────────────────────────────────────────
+            print("[demo] (2) DENY step — 2B raw claim through the gate")
+            deny_state["deny"] = True
+            pre_deny = post_allow
+            blocked = False
+            try:
+                await _drive("trigger-deny: please block me")
+            except (DecisionDenied, SpendGuardError):
+                blocked = True
+            except Exception as exc:  # noqa: BLE001 — MAF may wrap the block
+                if _is_block(exc):
+                    blocked = True
+                else:
+                    raise
+            post_deny = await _read_counter()
+            deny_state["deny"] = False
+            if not blocked:
+                print(
+                    "[demo] FATAL DENY: middleware did NOT fail-closed",
+                    file=sys.stderr,
+                )
+                return 7
+            if post_deny != pre_deny:
+                print(
+                    f"[demo] FATAL DENY: counting-stub pre={pre_deny} "
+                    f"post={post_deny} (expected unchanged)",
+                    file=sys.stderr,
+                )
+                return 7
+            print(
+                f"[demo] DENY ok — gate blocked BEFORE provider; counting "
+                f"UNCHANGED ({pre_deny} -> {post_deny})"
+            )
+
+            # ── (3) ALLOW2 ──────────────────────────────────────────────
+            print("[demo] (3) ALLOW2 step — second small message within budget")
+            pre_allow2 = post_deny
+            await _drive("another hi")
+            post_allow2 = await _read_counter()
+            if post_allow2 != pre_allow2 + 1:
+                print(
+                    f"[demo] FATAL ALLOW2: counting-stub pre={pre_allow2} "
+                    f"post={post_allow2} (expected +1)",
+                    file=sys.stderr,
+                )
+                return 7
+            print(
+                f"[demo] ALLOW2 ok — provider reached {pre_allow2} -> {post_allow2}"
+            )
 
         print("[demo] maf_python ALL 3 steps PASS (ALLOW + DENY + ALLOW2)")
         return 0

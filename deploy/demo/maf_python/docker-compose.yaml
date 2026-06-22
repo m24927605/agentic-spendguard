@@ -152,6 +152,10 @@ services:
       SPENDGUARD_PRICING_VERSION: "demo-pricing-v1"
       SPENDGUARD_HANDSHAKE_TIMEOUT_MS: "30000"
       SPENDGUARD_COUNTING_STUB_URL: "http://counting-stub:8765"
+      # MAF's OpenAIChatClient is constructed with explicit base_url/api_key in
+      # run.py; these env mirrors keep the underlying openai SDK happy too.
+      OPENAI_API_KEY: "sk-spendguard-demo-stub"
+      OPENAI_BASE_URL: "http://counting-stub:8765/v1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_CACHE_DIR: "off"
     volumes:
@@ -159,6 +163,11 @@ services:
       - ../..:/opt/spendguard:ro
       # Sidecar UDS shared with the rest of the stack.
       - sidecar-uds:/var/run/spendguard
+      # HARDEN_D05_UR: source pricing freeze from bundles runtime.env so the
+      # commit's PricingFreeze (snapshot hash / fx / unit conversion) matches
+      # the contract bundle the sidecar loaded — else the commit is rejected
+      # with a "pricing freeze mismatch".
+      - bundles-data:/var/lib/spendguard/bundles:ro
       # Writable site-packages persistence across re-runs.
       - maf-python-runner-venv:/opt/venv
     tmpfs:
@@ -200,6 +209,19 @@ services:
           sleep 1
         done
 
+        # HARDEN_D05_UR: source bundles runtime.env so
+        # SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX / FX / UNIT_CONVERSION match the
+        # contract bundle the sidecar loaded (mirrors the other root runners).
+        if [ -f /var/lib/spendguard/bundles/runtime.env ]; then
+          echo "[maf-python-runner] sourcing /var/lib/spendguard/bundles/runtime.env..."
+          set -a
+          . /var/lib/spendguard/bundles/runtime.env
+          set +a
+        else
+          echo "[maf-python-runner] FATAL: bundles runtime.env not found" >&2
+          exit 1
+        fi
+
         echo "[maf-python-runner] launching run.py --real..."
         exec python "$$STAGING/run.py" --real
     depends_on:
@@ -212,4 +234,5 @@ services:
         aliases: [maf-python-runner]
 
 volumes:
+  bundles-data:
   maf-python-runner-venv:
