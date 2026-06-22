@@ -199,10 +199,23 @@ def _stable_call_key(path: str) -> str:
     Edge case: a path with no ``.`` (single segment such as
     ``"start"``) is returned unchanged so the inflight key stays a
     string (never empty).
+
+    BeeAI 0.1.x emits each LLM-call event TWICE for one ``ChatModel.run``:
+    once at the backend emitter (``backend.<provider>.chat.<name>``) and once
+    mirrored at the Run level with a ``run.`` prefix
+    (``run.backend.<provider>.chat.<name>``). The two carry different full
+    paths, hence different signatures/idempotency_keys, so the sidecar does
+    NOT dedup them. We normalise the leading ``run.`` prefix away so both
+    collapse to the SAME call_key — the ``_on_start`` idempotency guard then
+    folds them into one reservation (no double-billing), and POST pops the
+    single slot regardless of which mirror delivered the success/error.
     """
     if "." not in path:
         return path
-    return path.rsplit(".", 1)[0]
+    base = path.rsplit(".", 1)[0]
+    if base.startswith("run."):
+        base = base[len("run.") :]
+    return base
 
 
 def _default_call_signature(ev: BeeAiStartEvent) -> str:
@@ -420,12 +433,22 @@ def subscribe_spendguard(  # noqa: PLR0913
         estimator = claim_estimator
 
     def _predicate(event: Any) -> bool:
-        """Match any event named start/success/error whose path has llm."""
+        """Match a start/success/error event for an LLM call.
+
+        BeeAI 0.1.x emits LLM-call events on the *ChatModel's* emitter with
+        paths like ``backend.openai.chat.start`` (a ``chat`` segment, NOT an
+        ``llm`` segment), and those events do NOT bubble up to the agent's
+        emitter. So callers subscribe on the ChatModel's emitter (pass the
+        ChatModel, or ``agent.llm``), and we match either a ``chat`` or an
+        ``llm`` path segment to stay tolerant across BeeAI layouts. On a
+        ChatModel emitter only chat events fire, so this never over-matches.
+        """
         name = getattr(event, "name", None)
         if name not in ("start", "success", "error"):
             return False
         path = getattr(event, "path", "") or ""
-        return "llm" in path.split(".")
+        segs = path.split(".")
+        return "llm" in segs or "chat" in segs
 
     async def _handle(data: Any, meta: Any) -> None:
         ev_name = getattr(meta, "name", None)
@@ -473,6 +496,23 @@ def subscribe_spendguard(  # noqa: PLR0913
         )
 
         call_key = _stable_call_key(path)
+        # Race-safe idempotency guard. BeeAI 0.1.x emits the LLM-call ``start``
+        # event MORE THAN ONCE for a single ChatModel.run (a Run-level start
+        # plus an inner backend start — same ``backend.<provider>.chat.start``
+        # path → same call_key, but DIFFERENT event payloads → different
+        # signatures/idempotency_keys, so the sidecar does NOT dedup them).
+        # request_decision is not idempotent across distinct keys, so without
+        # this guard one logical LLM call reserves the budget TWICE
+        # (double-billing; on a thin budget the second reserve balance-denies
+        # and aborts the run). BeeAI dispatches the two starts CONCURRENTLY via
+        # a TaskGroup, so a plain check-then-reserve races. We claim the
+        # call_key slot SYNCHRONOUSLY with a placeholder BEFORE the
+        # request_decision await — there is no await between the membership
+        # check and the placeholder put, so in asyncio's single thread the two
+        # starts cannot both pass. The duplicate returns early; POST pops the
+        # one slot.
+        if call_key in inflight_map:
+            return
         signature = sig_fn(start_ev)
         llm_call_id = str(
             derive_uuid_from_signature(signature, scope="llm_call_id")
@@ -481,6 +521,22 @@ def subscribe_spendguard(  # noqa: PLR0913
             derive_uuid_from_signature(signature, scope="decision_id")
         )
         step_id = f"{ctx.run_id}:beeai:{signature[:16]}"
+        # Placeholder (no reservation_ids yet) claims the call_key atomically
+        # with the check above (no await in between).
+        inflight_map.put(
+            call_key,
+            _InflightReservation(
+                signature=signature,
+                reservation_ids=[],
+                decision_id=decision_id,
+                llm_call_id=llm_call_id,
+                step_id=step_id,
+                run_id=ctx.run_id,
+                unit=unit,
+                pricing=pricing,
+                model_id=model_id,
+            ),
+        )
         idempotency_key = derive_idempotency_key(
             tenant_id=client.tenant_id,
             session_id=client.session_id,
@@ -501,26 +557,31 @@ def subscribe_spendguard(  # noqa: PLR0913
         # ``request_decision`` raises DecisionDenied on DENY; reaching
         # the next line = ALLOW (CONTINUE) or DEGRADE. We do NOT
         # try/except DecisionDenied — letting it propagate is the
-        # locked contract for security §S2 / lifecycle §L1.
-        outcome: DecisionOutcome = await client.request_decision(
-            trigger="LLM_CALL_PRE",
-            run_id=ctx.run_id,
-            step_id=step_id,
-            llm_call_id=llm_call_id,
-            tool_call_id="",
-            decision_id=decision_id,
-            route=route,
-            projected_claims=estimator(start_ev),
-            idempotency_key=idempotency_key,
-            projected_unit=unit,
-            decision_context_json=decision_context,
-        )
+        # locked contract for security §S2 / lifecycle §L1. On a STOP we
+        # release the placeholder so the call_key is free again (the DENY
+        # turn must be able to re-enter; a leak would block future calls).
+        try:
+            outcome: DecisionOutcome = await client.request_decision(
+                trigger="LLM_CALL_PRE",
+                run_id=ctx.run_id,
+                step_id=step_id,
+                llm_call_id=llm_call_id,
+                tool_call_id="",
+                decision_id=decision_id,
+                route=route,
+                projected_claims=estimator(start_ev),
+                idempotency_key=idempotency_key,
+                projected_unit=unit,
+                decision_context_json=decision_context,
+            )
+        except BaseException:
+            inflight_map.pop(call_key)
+            raise
 
-        # Stash for the matching success/error handler. Even when
-        # outcome.reservation_ids is empty (DEGRADE / SKIPPED) we
-        # still record the slot so a future success commits
-        # PROVIDER_REPORTED downstream of the projection-pipeline
-        # outcome.
+        # Replace the placeholder with the real reservation. Even when
+        # outcome.reservation_ids is empty (DEGRADE / SKIPPED) we still record
+        # the slot so a future success commits downstream of the
+        # projection-pipeline outcome.
         inflight_map.put(
             call_key,
             _InflightReservation(
@@ -644,9 +705,13 @@ def _extract_usage_success(data: Any) -> tuple[int, str]:
 
     # Tier 1: direct attrs on the payload.
     usage = getattr(data, "usage", None)
-    # Tier 2: nested under .output / .response.
+    # Tier 2: nested under .value / .output / .response. BeeAI 0.1.x wraps the
+    # ChatModelOutput under ``ChatModelSuccessEvent.value`` (``.value.usage``
+    # carries total_tokens) — ``value`` MUST be in this cascade or the commit
+    # estimate is 0 and the sidecar rejects it ("estimated_amount_atomic must
+    # be > 0"), leaking the reservation.
     if usage is None:
-        for attr in ("output", "response", "result"):
+        for attr in ("value", "output", "response", "result"):
             inner = getattr(data, attr, None)
             if inner is not None:
                 usage = getattr(inner, "usage", None)

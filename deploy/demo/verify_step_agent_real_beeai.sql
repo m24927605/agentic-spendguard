@@ -11,7 +11,11 @@
 --   - reserve >= 1 (ALLOW path: subscribe_spendguard's `*.start`
 --     handler reserves)
 --   - commit_estimated >= 1 (ALLOW path: `*.success` handler commits)
---   - denied_decision >= 0 (DENY variant optional — surfaces via the
+--   - denied_decision >= 1 (the live driver ALWAYS runs a real DENY turn — a
+--     real ReActAgent.run with a 2B raw claim hits the contract
+--     hard-cap-deny rule; _on_start raises DecisionDenied before the LLM
+--     call so the counting-stub stays flat. No fabrication.)
+--   - (legacy note) DENY variant — surfaces via the
 --     start handler raising DecisionDenied which BeeAI's Emitter wraps
 --     as EmitterError preserving __cause__ — model HTTP never reached).
 --
@@ -80,6 +84,13 @@ BEGIN
     END IF;
     IF v_commit < 1 THEN
         RAISE EXCEPTION 'COV_D23_GATE: ledger_transactions.commit_estimated >= 1 expected (ALLOW), got %', v_commit;
+    END IF;
+    -- The live driver now ALWAYS exercises a real DENY turn: a real
+    -- ReActAgent.run with a 2B raw claim hits the contract hard-cap-deny
+    -- rule; _on_start's request_decision raises DecisionDenied before the LLM
+    -- call and the sidecar records a denied_decision. No fabrication.
+    IF v_denied < 1 THEN
+        RAISE EXCEPTION 'COV_D23_GATE: ledger_transactions.denied_decision >= 1 expected (real DENY turn), got %', v_denied;
     END IF;
 
     RAISE NOTICE 'COV_D23 LEDGER OK: reserve=% commit=% denied=%',

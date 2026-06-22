@@ -5958,10 +5958,21 @@ async def run_smolagents_mode() -> int:  # noqa: PLR0915
 # ---------------------------------------------------------------------------
 
 
-async def run_beeai_mode() -> int:
-    """COV_D23: drive `beeai_framework.agents.react.ReActAgent` through SpendGuard."""
-    from types import SimpleNamespace
+async def run_beeai_mode() -> int:  # noqa: PLR0915
+    """COV_D23: drive a REAL `beeai_framework.backend.chat.ChatModel`.
 
+    No fakes: the agent_real_beeai runner ships beeai-framework + openai, so
+    an ImportError is FATAL (return 8) — no duck-typed _FakeEmitter fallback.
+    subscribe_spendguard installs a SpendGuard handler on agent.emitter; the
+    handler's _on_start awaits request_decision BEFORE the LLM call.
+      * ALLOW — ChatModel.run reaches the counting-stub (post>pre).
+      * DENY  — flip ONE estimator to a 2B raw claim → contract hard-cap-deny;
+        request_decision raises DecisionDenied (BeeAI's Emitter wraps it as
+        EmitterError preserving __cause__) so the LLM is never called. The
+        load-bearing proof is the FLAT counting-stub (vs the ALLOW positive
+        control). BeeAI is async-native: the handler + the grpc client both
+        run on run_demo's loop, so there is no cross-loop bridging.
+    """
     from spendguard import SpendGuardClient, new_uuid7
     from spendguard._proto.spendguard.common.v1 import common_pb2
 
@@ -6029,12 +6040,18 @@ async def run_beeai_mode() -> int:
     BeeAIRunContext = options_mod.RunContext
     beeai_run_context = hook_mod.run_context
 
+    # One estimator drives BOTH turns: a mutable flag flips a small ALLOW
+    # claim to a 2B raw claim that trips the demo contract's 1B
+    # hard-cap-deny rule (the SAME mechanism the other adapters use).
+    deny_state = {"deny": False}
+
     def estimate_claims(_event):
+        amount = "2000000000" if deny_state["deny"] else "500"
         return [
             common_pb2.BudgetClaim(
                 budget_id=budget_id,
                 unit=unit,
-                amount_atomic="500",
+                amount_atomic=amount,
                 direction=common_pb2.BudgetClaim.DEBIT,
                 window_instance_id=window_id,
             ),
@@ -6043,46 +6060,125 @@ async def run_beeai_mode() -> int:
     run_id = str(new_uuid7())
     print(f"[demo] beeai run_id={run_id}")
 
-    real_beeai_used = False
-    unsubscribe = None
     try:
-        from beeai_framework.agents.react import (  # type: ignore[import-not-found]
-            ReActAgent,
-        )
         from beeai_framework.backend.chat import (  # type: ignore[import-not-found]
             ChatModel,
         )
-
-        llm = ChatModel.from_name("openai:gpt-4o-mini")
-        agent = ReActAgent(llm=llm, tools=[])
-        unsubscribe = subscribe_spendguard(
-            agent=agent,
-            client=client,
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-            claim_estimator=estimate_claims,
+        from beeai_framework.backend.message import (  # type: ignore[import-not-found]
+            UserMessage,
         )
-        async with beeai_run_context(BeeAIRunContext(run_id=run_id)):
-            result = await agent.run("Say hello in three words.")
-        rid = getattr(result, "id", getattr(result, "run_id", "unknown"))
-        print(
-            f"[demo] agent_real_beeai run completed: ALLOW path "
-            f"result.id={rid}"
-        )
-        real_beeai_used = True
     except ImportError as exc:
+        # No fabrication: the agent_real_beeai runner ships beeai-framework.
         print(
-            f"[demo] beeai-framework not importable ({exc}); using duck-typed "
-            "driver path (CI smoke gate).",
+            f"[demo] FATAL: beeai-framework not importable in the beeai runner "
+            f"({exc}); refusing to fake a pass.",
             file=sys.stderr,
         )
-    except Exception as exc:  # noqa: BLE001
+        await client.close()
+        return 8
+
+    # ChatModel.from_name('openai:...') instantiates BeeAI's OpenAIChatModel,
+    # which reads OPENAI_BASE_URL/OPENAI_API_KEY (the overlay points both at
+    # the counting-stub). In beeai-framework 0.1.x the LLM-call events
+    # (backend.<provider>.chat.start/success/error) fire on the ChatModel's
+    # OWN emitter — they do NOT bubble to an agent's emitter — so we subscribe
+    # the SpendGuard gate on the ChatModel emitter (pass the ChatModel) and
+    # drive ChatModel.run directly. A ReActAgent just calls this same
+    # ChatModel.run internally, so gating it gates the agent too; we drive the
+    # ChatModel because the counting-stub can't satisfy ReActAgent's streaming
+    # + ReAct-action parsing. stream=False so the stub's JSON response yields a
+    # real success → POST commit.
+    llm = ChatModel.from_name("openai:gpt-4o-mini")
+    unsubscribe = subscribe_spendguard(
+        agent=llm,
+        client=client,
+        budget_id=budget_id,
+        window_instance_id=window_id,
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate_claims,
+    )
+
+    async def _drive(prompt: str, rid: str):
+        async with beeai_run_context(BeeAIRunContext(run_id=rid)):
+            try:
+                return ("ok", await llm.run([UserMessage(prompt)], stream=False))
+            except BaseException as exc:  # noqa: BLE001 — capture for chain-walk
+                return ("err", exc)
+
+    try:
+        # ── ALLOW turn ──────────────────────────────────────────────
+        pre = _read_counting_stub_hits_sync()
+        kind, payload = await _drive("Say hello in three words.", run_id)
+        post = _read_counting_stub_hits_sync()
+        if post <= pre:
+            detail = (
+                f"{type(payload).__name__}: {payload}"
+                if kind == "err"
+                else payload
+            )
+            print(
+                f"[demo] FATAL: beeai ALLOW did not reach provider "
+                f"(counting-stub {pre} -> {post}); run={kind} "
+                f"{str(detail)[:160]}",
+                file=sys.stderr,
+            )
+            await client.close()
+            return 7
+        allow_detail = (
+            type(payload).__name__ if kind == "err" else str(payload)[:48]
+        )
         print(
-            f"[demo] beeai ReActAgent.run raised "
-            f"{type(exc).__name__}: {exc}; falling back to duck-typed path.",
-            file=sys.stderr,
+            f"[demo] agent_real_beeai ALLOW ok — real ChatModel.run reached "
+            f"provider (run={kind} {allow_detail!r}); counting {pre} -> {post}"
+        )
+
+        # ── DENY turn (REAL — no fabrication) ───────────────────────
+        # Flip the SAME estimator to a 2B raw claim → contract hard-cap-deny.
+        # _on_start awaits request_decision which raises DecisionDenied BEFORE
+        # the LLM call; BeeAI's Emitter wraps it as EmitterError preserving
+        # __cause__. The load-bearing proof is the FLAT counting-stub (vs the
+        # ALLOW positive control that incremented — which rules out a gate
+        # that simply never fired).
+        from spendguard.errors import DecisionDenied
+        deny_state["deny"] = True
+        pre_deny = _read_counting_stub_hits_sync()
+        kind_d, payload_d = await _drive("DENY test", f"{run_id}:deny")
+        post_deny = _read_counting_stub_hits_sync()
+
+        if post_deny != pre_deny:
+            print(
+                f"[demo] FATAL: beeai DENY turn hit the provider "
+                f"(counting-stub {pre_deny} -> {post_deny})",
+                file=sys.stderr,
+            )
+            await client.close()
+            return 7
+
+        denied_in_chain = False
+        if kind_d == "err":
+            cur, seen = payload_d, set()
+            while cur is not None and id(cur) not in seen:
+                seen.add(id(cur))
+                if isinstance(cur, DecisionDenied):
+                    denied_in_chain = True
+                    break
+                cur = cur.__cause__ or cur.__context__
+        if kind_d == "err" and denied_in_chain:
+            how = "DecisionDenied propagated out of ChatModel.run"
+        elif kind_d == "err":
+            how = (
+                f"BeeAI wrapped the block as {type(payload_d).__name__} "
+                "(counting-flat + ALLOW positive control prove the block)"
+            )
+        else:
+            how = (
+                "BeeAI returned a result without raising; counting-flat + the "
+                "ALLOW positive control prove the LLM was never called"
+            )
+        print(
+            "[demo] agent_real_beeai DENY ok — real ChatModel.run blocked "
+            f"({how}); counting-stub UNCHANGED ({pre_deny} -> {post_deny})"
         )
     finally:
         if unsubscribe is not None:
@@ -6091,79 +6187,11 @@ async def run_beeai_mode() -> int:
             except Exception:  # noqa: BLE001
                 pass
 
-    if not real_beeai_used:
-        # Duck-typed driver — emulates BeeAI's Emitter so the
-        # subscriber wired through subscribe_spendguard exercises the
-        # exact same _on_start / _on_success code paths as the real
-        # framework would. Mirrors the SLICE 3 unit tests'
-        # `_FakeEmitter`.
-        class _FakeEmitter:
-            def __init__(self) -> None:
-                self.predicates = []
-                self.callbacks = []
-
-            def match(self, matcher, callback, options=None):  # noqa: D401, ARG002
-                self.predicates.append(matcher)
-                self.callbacks.append(callback)
-                idx = len(self.predicates) - 1
-
-                def _unsub() -> None:
-                    self.predicates[idx] = lambda _ev: False
-
-                return _unsub
-
-            async def emit(self, name: str, data, path: str) -> None:
-                meta = SimpleNamespace(name=name, path=path, id=f"evt-{name}")
-                for pred, cb in zip(
-                    self.predicates, self.callbacks, strict=False
-                ):
-                    if pred(meta):
-                        await cb(data, meta)
-
-        emitter = _FakeEmitter()
-        agent_stub = SimpleNamespace(emitter=emitter)
-        unsubscribe = subscribe_spendguard(
-            agent=agent_stub,
-            client=client,
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-            claim_estimator=estimate_claims,
-        )
-        try:
-            async with beeai_run_context(BeeAIRunContext(run_id=run_id)):
-                # PRE: subscribe_spendguard's *.start handler reserves.
-                await emitter.emit(
-                    "start",
-                    SimpleNamespace(
-                        input=["Say hello in three words."],
-                        modelId="gpt-4o-mini",
-                    ),
-                    "agent.react.llm.demo-001.start",
-                )
-                # POST: subscribe_spendguard's *.success handler commits.
-                await emitter.emit(
-                    "success",
-                    SimpleNamespace(
-                        usage={
-                            "prompt_tokens": 8,
-                            "completion_tokens": 14,
-                            "total_tokens": 22,
-                        },
-                        id="chatcmpl-beeai-stub-1",
-                    ),
-                    "agent.react.llm.demo-001.success",
-                )
-            print("[demo] agent_real_beeai run completed: ALLOW path (stub)")
-        finally:
-            if unsubscribe is not None:
-                try:
-                    unsubscribe()
-                except Exception:  # noqa: BLE001
-                    pass
-
     await client.close()
+    print(
+        "[demo] agent_real_beeai ALL steps PASS "
+        "(real ALLOW + real DENY via subscribe_spendguard, no fakes)"
+    )
     return 0
 
 
