@@ -410,19 +410,32 @@ class SpendGuardStrandsHookProvider(_ProviderBase):  # type: ignore[misc, valid-
                 "claim_estimator is None; supply one at construction."
             )
 
-        inv = getattr(event, "invocation", None)
-        if inv is None:
-            raise SpendGuardConfigError(
-                "BeforeInvocationEvent.invocation missing — Strands GA "
-                "contract requires it. Verify strands-agents>=1.0."
-            )
-        invocation_id = getattr(inv, "invocation_id", None)
+        # Strands GA (strands-agents>=1.0) BeforeInvocationEvent exposes
+        # ``agent`` / ``messages`` / ``invocation_state`` DIRECTLY — there is
+        # NO ``event.invocation`` wrapper and NO ``invocation_id`` (the pre-GA
+        # shape this adapter was authored against). We carry a correlation id
+        # (and later the reservation) in ``invocation_state`` — the SAME dict
+        # object flows to the matching after_invocation — so the before/after
+        # pair correlate without a framework-supplied id.
+        inv = event  # estimator/reconciler now receive the event itself
+        agent = getattr(event, "agent", None)
+        inv_state = getattr(event, "invocation_state", None)
+        invocation_id = ""
+        if isinstance(inv_state, dict):
+            invocation_id = str(inv_state.get("_spendguard_invocation_id", "") or "")
+            if not invocation_id:
+                invocation_id = str(
+                    derive_uuid_from_signature(
+                        f"strands-inv:{id(inv_state)}", scope="invocation_id"
+                    )
+                )
+                inv_state["_spendguard_invocation_id"] = invocation_id
         if not invocation_id:
-            raise SpendGuardConfigError(
-                "Strands Invocation has no invocation_id — pinned contract "
-                "as of strands-agents>=1.0. Verify SDK version."
+            invocation_id = str(
+                derive_uuid_from_signature(
+                    f"strands-inv:{id(event)}", scope="invocation_id"
+                )
             )
-        invocation_id = str(invocation_id)
 
         estimator_claims = self._claim_estimator(inv)
         if len(estimator_claims) != 1:
@@ -471,7 +484,8 @@ class SpendGuardStrandsHookProvider(_ProviderBase):  # type: ignore[misc, valid-
             trigger="LLM_CALL_PRE",
         )
 
-        model = getattr(inv, "model", None)
+        # The model lives on the agent in the GA event shape.
+        model = getattr(agent, "model", None)
         model_backend = _model_backend_name(model)
         model_id = str(getattr(model, "model_id", "") or "") if model is not None else ""
 
@@ -562,12 +576,15 @@ class SpendGuardStrandsHookProvider(_ProviderBase):  # type: ignore[misc, valid-
         CANCELLED → emit_llm_call_post(CANCELLED) — caller cancelled.
         no-pending → no-op (PRE was skipped under fail-open or test).
         """
-        inv = getattr(event, "invocation", None)
+        # GA event shape: read the correlation id that before_invocation
+        # stashed in the shared ``invocation_state`` dict.
+        inv = event  # reconciler receives the event itself
+        inv_state = getattr(event, "invocation_state", None)
         invocation_id = ""
-        if inv is not None:
-            invocation_id = str(getattr(inv, "invocation_id", "") or "")
-        # Fall back to event-level invocation_id if Strands exposes it
-        # directly on AfterInvocationEvent (some 1.x point releases do).
+        if isinstance(inv_state, dict):
+            invocation_id = str(inv_state.get("_spendguard_invocation_id", "") or "")
+        # Fall back to event-level invocation_id if a Strands point release
+        # exposes one directly.
         if not invocation_id:
             invocation_id = str(getattr(event, "invocation_id", "") or "")
 

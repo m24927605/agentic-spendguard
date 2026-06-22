@@ -4566,197 +4566,15 @@ async def run_adk_stub_mode() -> int:
 
 
 async def run_strands_mode() -> int:
-    """Run a Strands Agent end-to-end with SpendGuard PRE/POST.
+    """COV_D20: drive a REAL Strands Agent through ALLOW + DENY.
 
-    Multi-backend coverage proof: exercises Bedrock + OpenAI shapes
-    through the same provider instance. Uses the counting-stub for
-    upstream HTTP so no real cloud credentials are required.
-
-    Falls back to a duck-typed driver path when ``strands-agents`` is
-    not importable in the demo container (CI smoke path).
+    Delegates to run_strands_deny_mode so BOTH DEMO_MODEs (agent_real_strands
+    and agent_real_strands_deny) exercise the same genuine path: a real
+    strands.Agent(model=OpenAIModel(...), hooks=[guard]).invoke_async driven
+    through a real ALLOW (provider reached) + real DENY (gate blocks before
+    the model HTTP). No duck-typed SimpleNamespace driver.
     """
-    from types import SimpleNamespace
-
-    from spendguard import SpendGuardClient, new_uuid7
-    from spendguard._proto.spendguard.common.v1 import common_pb2
-
-    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
-    tenant_id = _env("SPENDGUARD_TENANT_ID")
-    budget_id = _env("SPENDGUARD_BUDGET_ID")
-    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
-    unit_id = _env("SPENDGUARD_UNIT_ID")
-    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
-    fx = _env("SPENDGUARD_FX_RATE_VERSION")
-    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
-    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
-
-    print(f"[demo] connecting to sidecar at {socket_path}")
-    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
-    client: SpendGuardClient | None = None
-    last_err: BaseException | None = None
-    while time.monotonic() < deadline:
-        try:
-            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
-            await c.connect()
-            await c.handshake()
-            client = c
-            break
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            await asyncio.sleep(1)
-    if client is None:
-        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
-        return 3
-    print(f"[demo] handshake ok session_id={client.session_id}")
-
-    unit = common_pb2.UnitRef(
-        unit_id=unit_id,
-        token_kind="output_token",
-        model_family="anthropic.claude-3-5-sonnet",
-    )
-    pricing = common_pb2.PricingFreeze(
-        pricing_version=pricing_version,
-        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
-        fx_rate_version=fx,
-        unit_conversion_version=unit_conv,
-    )
-
-    # Load the provider via the package-namespace bypass — the demo
-    # container may or may not have strands-agents installed; the
-    # in-tree spendguard.integrations.strands package barrel raises
-    # ImportError when the extra is missing. We load the
-    # _hook_provider module directly so the smoke path still works.
-    import importlib
-    import types as _t
-    pkg_name = "spendguard.integrations.strands"
-    if pkg_name not in sys.modules:
-        from pathlib import Path as _P
-        ns = _t.ModuleType(pkg_name)
-        sdk_root = _P("/opt/spendguard/sdk/python/src/spendguard/integrations/strands")
-        if not sdk_root.exists():
-            # Local-run fallback when not in the demo container.
-            sdk_root = _P(__file__).resolve().parents[3] / \
-                "sdk/python/src/spendguard/integrations/strands"
-        ns.__path__ = [str(sdk_root)]
-        sys.modules[pkg_name] = ns
-    provider_mod = importlib.import_module(
-        "spendguard.integrations.strands._hook_provider"
-    )
-    SpendGuardStrandsHookProvider = provider_mod.SpendGuardStrandsHookProvider
-
-    def estimate_claims(_inv):
-        return [
-            common_pb2.BudgetClaim(
-                budget_id=budget_id,
-                unit=unit,
-                amount_atomic="500",
-                direction=common_pb2.BudgetClaim.DEBIT,
-                window_instance_id=window_id,
-            ),
-        ]
-
-    def reconcile(_inv, result):
-        usage = getattr(result, "usage", None)
-        amount = 0
-        if usage is not None:
-            total = getattr(usage, "total_tokens", None)
-            if isinstance(total, int) and total > 0:
-                amount = total
-            else:
-                inp = getattr(usage, "input_tokens", 0) or 0
-                out = getattr(usage, "output_tokens", 0) or 0
-                amount = int(inp) + int(out)
-        return [
-            common_pb2.BudgetClaim(
-                budget_id=budget_id,
-                unit=unit,
-                amount_atomic=str(amount or 100),
-                direction=common_pb2.BudgetClaim.DEBIT,
-                window_instance_id=window_id,
-            )
-        ]
-
-    guard = SpendGuardStrandsHookProvider(
-        client=client,
-        budget_id=budget_id,
-        window_instance_id=window_id,
-        unit=unit,
-        pricing=pricing,
-        claim_estimator=estimate_claims,
-        claim_reconciler=reconcile,
-    )
-
-    run_id = str(new_uuid7())
-    print(f"[demo] strands run_id={run_id}")
-
-    # Try real strands runtime; fall back to duck-typed path on
-    # ImportError (CI smoke gate).
-    real_strands_used = False
-    try:
-        from strands import Agent  # type: ignore[import-not-found]
-        from strands.models.bedrock import (  # type: ignore[import-not-found]
-            BedrockModel,
-        )
-
-        agent = Agent(
-            model=BedrockModel(
-                model_id="anthropic.claude-3-5-sonnet-20241022-v2:0"
-            ),
-            hooks=[guard],
-        )
-        result = await agent.invoke_async(prompt="Say hello in three words.")
-        print(
-            f"[demo] agent_real_strands run completed: ALLOW path "
-            f"result.id={getattr(result, 'id', 'unknown')}"
-        )
-        real_strands_used = True
-    except ImportError as exc:
-        print(
-            f"[demo] strands-agents not importable ({exc}); using duck-typed "
-            "driver path (CI smoke gate).",
-            file=sys.stderr,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"[demo] strands Agent.invoke_async raised "
-            f"{type(exc).__name__}: {exc}; falling back to duck-typed path.",
-            file=sys.stderr,
-        )
-
-    if not real_strands_used:
-        # Duck-typed driver — mirrors the SLICE 4 unit tests.
-        bedrock_model = SimpleNamespace(
-            model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
-        )
-        # Synthesize the class name as BedrockModel for the
-        # decision_context model_backend tag.
-        bedrock_cls = type("BedrockModel", (object,), {})
-        bedrock_inst = bedrock_cls()
-        bedrock_inst.model_id = "anthropic.claude-3-5-sonnet-20241022-v2:0"
-        invocation = SimpleNamespace(
-            invocation_id=f"strands-{run_id}",
-            model=bedrock_inst,
-            messages=[{"role": "user", "content": "Say hello in three words."}],
-            tools=[],
-        )
-        before_event = SimpleNamespace(invocation=invocation)
-        await guard.before_invocation(before_event)
-
-        result = SimpleNamespace(
-            id="msg_bedrock_stub_1",
-            usage=SimpleNamespace(
-                input_tokens=12, output_tokens=30, total_tokens=42,
-            ),
-            message={"role": "assistant", "content": "hi from stub"},
-        )
-        after_event = SimpleNamespace(
-            invocation=invocation, result=result, exception=None,
-        )
-        await guard.after_invocation(after_event)
-        print("[demo] agent_real_strands run completed: ALLOW path (stub)")
-
-    await client.close()
-    return 0
+    return await run_strands_deny_mode()
 
 
 async def run_strands_deny_mode() -> int:
@@ -4768,7 +4586,6 @@ async def run_strands_deny_mode() -> int:
     HTTP — meaning the counting-stub records the same hit count on the
     DENY turn as it did at the end of the ALLOW turn.
     """
-    from types import SimpleNamespace
 
     from spendguard import SpendGuardClient, new_uuid7
     from spendguard._proto.spendguard.common.v1 import common_pb2
@@ -4833,99 +4650,167 @@ async def run_strands_deny_mode() -> int:
     SpendGuardStrandsHookProvider = provider_mod.SpendGuardStrandsHookProvider
     from spendguard.errors import DecisionDenied
 
+    # Flag estimator: "500" ALLOW / "2000000000" 2B raw DENY → the demo
+    # contract's 1B hard-cap-deny rule (recordable, like maf/autogen).
+    deny_state = {"deny": False}
+
+    def estimate_claims(_inv):
+        amount = "2000000000" if deny_state["deny"] else "500"
+        return [
+            common_pb2.BudgetClaim(
+                budget_id=budget_id,
+                unit=unit,
+                amount_atomic=amount,
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            ),
+        ]
+
+    def reconcile(_inv, result):
+        amount = 0
+        try:
+            usage = getattr(result, "usage", None)
+            if usage is None:
+                metrics = getattr(result, "metrics", None)
+                usage = getattr(metrics, "accumulated_usage", None)
+            if usage is not None:
+                if isinstance(usage, dict):
+                    amount = int(
+                        usage.get("total_tokens")
+                        or usage.get("totalTokens")
+                        or (usage.get("inputTokens", 0) or 0)
+                        + (usage.get("outputTokens", 0) or 0)
+                    )
+                else:
+                    total = getattr(usage, "total_tokens", None)
+                    if isinstance(total, int):
+                        amount = total
+                    else:
+                        amount = (getattr(usage, "input_tokens", 0) or 0) + (
+                            getattr(usage, "output_tokens", 0) or 0
+                        )
+        except Exception:  # noqa: BLE001 — never crash the audit chain
+            amount = 0
+        return [
+            common_pb2.BudgetClaim(
+                budget_id=budget_id,
+                unit=unit,
+                amount_atomic=str(amount or 100),
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            )
+        ]
+
     guard = SpendGuardStrandsHookProvider(
         client=client,
         budget_id=budget_id,
         window_instance_id=window_id,
         unit=unit,
         pricing=pricing,
-        claim_estimator=lambda _inv: [
-            common_pb2.BudgetClaim(
-                budget_id=budget_id,
-                unit=unit,
-                amount_atomic="500",
-                direction=common_pb2.BudgetClaim.DEBIT,
-                window_instance_id=window_id,
-            ),
-        ],
-        claim_reconciler=lambda _inv, _result: [
-            common_pb2.BudgetClaim(
-                budget_id=budget_id,
-                unit=unit,
-                amount_atomic="42",
-                direction=common_pb2.BudgetClaim.DEBIT,
-                window_instance_id=window_id,
-            )
-        ],
+        claim_estimator=estimate_claims,
+        claim_reconciler=reconcile,
     )
 
-    bedrock_cls = type("BedrockModel", (object,), {})
-    bedrock_inst = bedrock_cls()
-    bedrock_inst.model_id = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    counting_stub_url = os.environ.get(
+        "SPENDGUARD_COUNTING_STUB_URL", "http://counting-stub:8765"
+    )
+
+    try:
+        from strands import Agent  # type: ignore[import-not-found]
+        from strands.models.openai import (  # type: ignore[import-not-found]
+            OpenAIModel,
+        )
+    except ImportError as exc:
+        # No fabrication: the agent_real_strands runner ships strands-agents.
+        print(
+            f"[demo] FATAL: strands-agents/OpenAIModel not importable in the "
+            f"strands runner ({exc}); refusing to fake a pass.",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 8
+
+    # A real Strands Agent. OpenAIModel talks OpenAI-shape to the counting-stub
+    # (the BedrockModel would need real AWS + a Bedrock-shape endpoint); the
+    # SpendGuard gate (hooks) is provider-agnostic. The hook's before_invocation
+    # reserves; on DENY it raises DecisionDenied which Strands wraps into a
+    # HookExecutionError that propagates out of invoke_async.
+    model = OpenAIModel(
+        client_args={
+            "base_url": f"{counting_stub_url}/v1",
+            "api_key": "sk-spendguard-demo-stub",
+        },
+        model_id="gpt-4o-mini",
+    )
+    agent = Agent(model=model, hooks=[guard])
 
     # ── ALLOW turn ──────────────────────────────────────────────────
-    run_id_allow = str(new_uuid7())
-    inv_allow = SimpleNamespace(
-        invocation_id=f"strands-allow-{run_id_allow}",
-        model=bedrock_inst,
-        messages=[{"role": "user", "content": "ALLOW turn"}],
-        tools=[],
-    )
-    await guard.before_invocation(SimpleNamespace(invocation=inv_allow))
-    result_allow = SimpleNamespace(
-        id="msg_bedrock_allow",
-        usage=SimpleNamespace(
-            input_tokens=12, output_tokens=30, total_tokens=42,
-        ),
-    )
-    await guard.after_invocation(
-        SimpleNamespace(invocation=inv_allow, result=result_allow, exception=None)
-    )
-    print("[demo] agent_real_strands_deny ALLOW turn ok")
-
-    # ── DENY turn ───────────────────────────────────────────────────
-    # The actual budget exhaustion is set up by the sidecar's contract
-    # — in this demo we simulate it by issuing a 2nd PRE with a huge
-    # claim that exceeds the budget cap. If the sidecar is not wired
-    # for the cap, we exit 0 with a deferral note (same precedent as
-    # the ADK demo).
-    run_id_deny = str(new_uuid7())
-    inv_deny = SimpleNamespace(
-        invocation_id=f"strands-deny-{run_id_deny}",
-        model=bedrock_inst,
-        messages=[{"role": "user", "content": "DENY turn"}],
-        tools=[],
-    )
-    # Swap the guard's estimator to mint a hard-cap-busting claim so
-    # the sidecar emits STOP.
-    huge_claim = [
-        common_pb2.BudgetClaim(
-            budget_id=budget_id,
-            unit=unit,
-            amount_atomic="999999999",
-            direction=common_pb2.BudgetClaim.DEBIT,
-            window_instance_id=window_id,
-        ),
-    ]
-    guard._claim_estimator = lambda _inv: huge_claim  # noqa: SLF001
-    try:
-        await guard.before_invocation(SimpleNamespace(invocation=inv_deny))
+    pre = _read_counting_stub_hits_sync()
+    await agent.invoke_async("Say hello in three words.")
+    post = _read_counting_stub_hits_sync()
+    if post <= pre:
         print(
-            "[demo] WARN: DENY turn did not raise DecisionDenied; sidecar "
-            "contract may not enforce the cap in this demo configuration. "
-            "Treating as deferred (D05 UnitRef gap precedent)."
+            f"[demo] FATAL: strands ALLOW did not reach provider "
+            f"(counting-stub {pre} -> {post})",
+            file=sys.stderr,
         )
-    except DecisionDenied:
-        print(
-            "[demo] agent_real_strands_deny DENY turn ok — "
-            "DecisionDenied raised BEFORE provider HTTP fired."
-        )
+        await client.close()
+        return 7
     print(
-        "[demo] agent_real_strands_deny run completed: "
-        "ALLOW + DENY paths exercised"
+        f"[demo] agent_real_strands ALLOW ok — real Agent.invoke_async reached "
+        f"provider; counting {pre} -> {post}"
+    )
+
+    # ── DENY turn (REAL — no fabrication) ───────────────────────────
+    # Flip the SAME estimator to a 2B raw claim → contract hard-cap-deny.
+    # before_invocation raises DecisionDenied BEFORE Strands dispatches the
+    # model HTTP; Strands wraps it as HookExecutionError (DecisionDenied on
+    # __cause__). The load-bearing proof is the FLAT counting-stub.
+    deny_state["deny"] = True
+    pre_deny = _read_counting_stub_hits_sync()
+    denied = False
+    try:
+        await agent.invoke_async("DENY test")
+    except DecisionDenied:
+        denied = True
+    except Exception as exc:  # noqa: BLE001 — Strands wraps as HookExecutionError
+        cur, seen = exc, set()
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            if isinstance(cur, DecisionDenied):
+                denied = True
+                break
+            cur = cur.__cause__ or cur.__context__
+        if not denied:
+            raise
+    post_deny = _read_counting_stub_hits_sync()
+    if not denied:
+        print(
+            "[demo] FATAL: strands DENY turn did NOT raise DecisionDenied "
+            "(real Agent.invoke_async completed without a SpendGuard block)",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 7
+    if post_deny != pre_deny:
+        print(
+            f"[demo] FATAL: strands DENY turn hit the provider "
+            f"(counting-stub {pre_deny} -> {post_deny})",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 7
+    print(
+        "[demo] agent_real_strands DENY ok — real Agent.invoke_async blocked "
+        f"(DecisionDenied via HookExecutionError); counting-stub UNCHANGED "
+        f"({pre_deny} -> {post_deny})"
     )
 
     await client.close()
+    print(
+        "[demo] agent_real_strands ALL steps PASS "
+        "(real ALLOW + real DENY via SpendGuardStrandsHookProvider, no fakes)"
+    )
     return 0
 
 

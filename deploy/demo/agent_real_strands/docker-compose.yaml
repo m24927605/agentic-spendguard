@@ -211,12 +211,11 @@ services:
         . /opt/venv/bin/activate
 
         echo "[strands-runner] installing in-tree spendguard-sdk[strands]..."
-        # Strands package install may take a moment; we install best-effort
-        # and fall back to the duck-typed driver path when not available.
-        pip install -e '/opt/spendguard/sdk/python' || true
-        pip install 'strands-agents>=1.0,<2' || \
-          echo "[strands-runner] strands-agents install failed — driver "\
-               "will use duck-typed shapes (CI smoke path)."
+        # strands' OpenAIModel needs the openai backend ([openai] extra +
+        # openai). The driver now FATALs on import failure (no duck-typed
+        # fallback), so install the real deps.
+        pip install -e '/opt/spendguard/sdk/python'
+        pip install 'strands-agents[openai]>=1.0,<2' 'openai>=1.0'
 
         echo "[strands-runner] sidecar UDS ready check..."
         for i in $$(seq 1 60); do
