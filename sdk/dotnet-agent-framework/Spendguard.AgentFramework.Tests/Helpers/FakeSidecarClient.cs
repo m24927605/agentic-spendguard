@@ -39,6 +39,12 @@ public sealed class FakeSidecarClient : ISidecarClient
     /// <summary>Captured release requests in arrival order.</summary>
     public List<ReleaseReservationRequest> ReleaseCalls { get; } = new();
 
+    /// <summary>Captured emitted trace events (LLM_CALL_POST commits) in order.</summary>
+    public List<TraceEvent> TraceEventCalls { get; } = new();
+
+    /// <summary>If non-null, <see cref="EmitTraceEventAsync"/> throws this.</summary>
+    public Exception? EmitThrow;
+
     /// <summary>Captured handshake requests in arrival order.</summary>
     public List<(string Tenant, string Sdk, string Runtime)> HandshakeCalls { get; } = new();
 
@@ -115,6 +121,19 @@ public sealed class FakeSidecarClient : ISidecarClient
         int idx = Interlocked.Increment(ref _releaseIdx) - 1;
         var fn = ReleaseProducers[idx % ReleaseProducers.Count];
         return Task.FromResult(fn(request));
+    }
+
+    /// <inheritdoc/>
+    public Task EmitTraceEventAsync(
+        TraceEvent traceEvent,
+        CancellationToken ct = default)
+    {
+        TraceEventCalls.Add(traceEvent);
+        if (EmitThrow is not null)
+        {
+            throw EmitThrow;
+        }
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc/>
