@@ -4310,39 +4310,38 @@ async def run_maf_python_with_agt_mode() -> int:
 # ---------------------------------------------------------------------------
 
 
-async def run_adk_mode() -> int:
-    """Run a Google ADK ``LlmAgent`` end-to-end with SpendGuard PRE/POST.
+async def run_adk_mode() -> int:  # noqa: PLR0915
+    """Drive a REAL Google ADK ``LlmAgent`` through SpendGuard — no fakes.
 
-    Two turns:
-      1. ALLOW path — full budget room, ``LlmAgent`` calls Gemini,
-         POST commit fires with real ``usage_metadata`` tokens.
-      2. DENY path — budget exhausted via sidecar mock contract, PRE
-         returns a synthetic ``LlmResponse(error_code="SPENDGUARD_DENY")``,
-         the model is **never** called (counting-stub hit count = 0
-         for this turn).
-
-    Requires ``GOOGLE_API_KEY`` for real Gemini. Use
-    ``DEMO_MODE=agent_real_adk_stub`` for the no-API-key variant.
+    No GOOGLE_API_KEY needed: the agent uses ADK's ``LiteLlm`` model which
+    routes through litellm to the OpenAI-shape counting-stub (the real
+    Gemini transport has no base-url knob). The SpendGuard before/after model
+    callbacks gate every model call.
+      * ALLOW — before_model_callback returns None → the real model call
+        reaches the counting-stub (post>pre) → after_model_callback commits.
+      * DENY  — flip ONE estimator to a 2B raw claim → contract hard-cap-deny;
+        before_model_callback catches DecisionDenied and returns a synthetic
+        ``LlmResponse(error_code="SPENDGUARD_DENY")`` (ADK's documented
+        short-circuit), so the model is NEVER called (counting-stub flat) and
+        the sidecar records a denied_decision.
     """
-    if not os.environ.get("GOOGLE_API_KEY"):
+    try:
+        from google.adk.agents import LlmAgent  # type: ignore[import-not-found]
+        from google.adk.models.lite_llm import (  # type: ignore[import-not-found]
+            LiteLlm,
+        )
+        from google.adk.runners import (  # type: ignore[import-not-found]
+            InMemoryRunner,
+        )
+        from google.genai import types as genai_types  # type: ignore[import-not-found]
+    except ImportError as exc:
+        # No fabrication: the agent_real_adk runner ships google-adk + litellm.
         print(
-            "[demo] FATAL: GOOGLE_API_KEY required for agent_real_adk mode",
+            f"[demo] FATAL: google-adk/litellm not importable in the adk "
+            f"runner ({exc}); refusing to fake a pass.",
             file=sys.stderr,
         )
         return 8
-
-    # Import lazily so the demo container doesn't pay the cost when
-    # other DEMO_MODEs are selected.
-    try:
-        from google.adk.agents import LlmAgent
-        from google.adk.runners import InMemoryRunner
-    except ImportError as exc:
-        print(
-            f"[demo] FATAL: google-adk not installed in the demo container: "
-            f"{exc}. Install via `pip install 'spendguard-sdk[adk]'`.",
-            file=sys.stderr,
-        )
-        return 9
 
     from spendguard import SpendGuardClient, new_uuid7
     from spendguard.integrations.adk import SpendGuardAdkCallback
@@ -4376,12 +4375,10 @@ async def run_adk_mode() -> int:
         print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
         return 3
     print(f"[demo] handshake ok session_id={client.session_id}")
-    print("[demo] using real Gemini gemini-2.0-flash via Google ADK")
+    print("[demo] using ADK LiteLlm(openai/gpt-4o-mini) → counting-stub")
 
     unit = common_pb2.UnitRef(
-        unit_id=unit_id,
-        token_kind="output_token",
-        model_family="gemini-2.0-flash",
+        unit_id=unit_id, token_kind="output_token", model_family="gpt-4"
     )
     pricing = common_pb2.PricingFreeze(
         pricing_version=pricing_version,
@@ -4390,15 +4387,16 @@ async def run_adk_mode() -> int:
         unit_conversion_version=unit_conv,
     )
 
-    def estimate_claims(req):  # noqa: ANN001
-        # Conservative: reserve 500 atomic per call (well above
-        # gemini-2.0-flash's ~30-token response for short prompts; below
-        # the 1B contract cap).
+    # One estimator drives BOTH turns via a mutable flag.
+    deny_state = {"deny": False}
+
+    def estimate_claims(_req):
+        amount = "2000000000" if deny_state["deny"] else "100"
         return [
             common_pb2.BudgetClaim(
                 budget_id=budget_id,
                 unit=unit,
-                amount_atomic="500",
+                amount_atomic=amount,
                 direction=common_pb2.BudgetClaim.DEBIT,
                 window_instance_id=window_id,
             ),
@@ -4413,150 +4411,86 @@ async def run_adk_mode() -> int:
         claim_estimator=estimate_claims,
     )
 
+    # LiteLlm reads OPENAI_BASE_URL / OPENAI_API_KEY from env (the overlay
+    # points both at the counting-stub).
+    model = LiteLlm(model="openai/gpt-4o-mini")
     agent = LlmAgent(
-        name="spendguard-demo-adk-agent",
-        model="gemini-2.0-flash",
-        instructions="You are a budget-aware assistant.",
+        name="spendguard_demo_adk_agent",
+        model=model,
+        instruction="You are a budget-aware assistant.",
         before_model_callback=cb,
         after_model_callback=cb,
     )
-
-    # Run the agent. ADK 1.x runner shapes vary slightly between minor
-    # versions; we use InMemoryRunner which is the documented quickstart
-    # entry point. The async iteration walks every event the runner
-    # emits; we read the assistant response from the final event.
     runner = InMemoryRunner(agent=agent)
-    run_id = str(new_uuid7())
+    sess = await runner.session_service.create_session(
+        app_name=runner.app_name, user_id="demo-user"
+    )
+
+    async def _drive(prompt: str):
+        msg = genai_types.Content(
+            role="user", parts=[genai_types.Part(text=prompt)]
+        )
+        last = None
+        async for ev in runner.run_async(
+            user_id="demo-user", session_id=sess.id, new_message=msg
+        ):
+            last = ev
+        return last
 
     # ── ALLOW turn ──────────────────────────────────────────────────
-    print(f"[demo] adk turn 1 (ALLOW): run_id={run_id}")
-    user_message = "Say hello in three words."
-    try:
-        async for _event in runner.run_async(
-            session_id=client.session_id,
-            user_id="demo-user",
-            new_message=user_message,
-        ):
-            pass
-        print("[demo] agent_real_adk run completed: ALLOW path")
-    except Exception as e:  # noqa: BLE001
+    pre = _read_counting_stub_hits_sync()
+    await _drive("Say hello in three words.")
+    post = _read_counting_stub_hits_sync()
+    if post <= pre:
         print(
-            f"[demo] adk ALLOW turn raised {type(e).__name__}: {e}",
+            f"[demo] FATAL: adk ALLOW did not reach provider "
+            f"(counting-stub {pre} -> {post})",
             file=sys.stderr,
         )
         await client.close()
-        return 4
+        return 7
+    print(
+        f"[demo] agent_real_adk ALLOW ok — real LlmAgent reached provider "
+        f"via LiteLlm; counting {pre} -> {post}"
+    )
 
-    # ── DENY turn ───────────────────────────────────────────────────
-    # Note: the DENY path is exercised by setting BUDGET = 0 in the
-    # sidecar's contract. The actual budget reset is handled out-of-band
-    # by the demo harness; here we just observe that the ADK callback
-    # surfaces the deny correctly (via the synthetic LlmResponse).
-    # In stub-mode we exercise the same path without GOOGLE_API_KEY.
-    print("[demo] agent_real_adk run completed: DENY path (model not called)")
+    # ── DENY turn (REAL — no fabrication) ───────────────────────────
+    # Flip the SAME estimator to a 2B raw claim → contract hard-cap-deny.
+    # before_model_callback returns a synthetic LlmResponse(SPENDGUARD_DENY)
+    # so ADK short-circuits and the model HTTP NEVER fires (counting flat).
+    # The healthy ALLOW positive control rules out an outage; the sidecar
+    # records the denied_decision.
+    deny_state["deny"] = True
+    pre_deny = _read_counting_stub_hits_sync()
+    await _drive("DENY test")
+    post_deny = _read_counting_stub_hits_sync()
+    if post_deny != pre_deny:
+        print(
+            f"[demo] FATAL: adk DENY turn hit the provider "
+            f"(counting-stub {pre_deny} -> {post_deny})",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 7
+    print(
+        "[demo] agent_real_adk DENY ok — before_model returned a synthetic "
+        f"SPENDGUARD_DENY LlmResponse; model NEVER called, counting-stub "
+        f"UNCHANGED ({pre_deny} -> {post_deny})"
+    )
 
     await client.close()
+    print(
+        "[demo] agent_real_adk ALL steps PASS "
+        "(real ALLOW + real DENY via SpendGuardAdkCallback, no fakes)"
+    )
     return 0
 
 
 async def run_adk_stub_mode() -> int:
-    """No-API-key variant of ``agent_real_adk`` for CI smoke testing.
-
-    Exercises the SpendGuardAdkCallback against a duck-typed
-    ``LlmRequest`` / ``LlmResponse`` (no real Gemini), verifying the
-    PRE reserve + POST commit RPC round-trip flows. Used by gate G08
-    in deploy/demo/tests/test_agent_real_adk_demo.py.
-    """
-    from types import SimpleNamespace
-
-    from spendguard import SpendGuardClient, new_uuid7
-    from spendguard.integrations.adk import SpendGuardAdkCallback
-    from spendguard._proto.spendguard.common.v1 import common_pb2
-
-    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
-    tenant_id = _env("SPENDGUARD_TENANT_ID")
-    budget_id = _env("SPENDGUARD_BUDGET_ID")
-    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
-    unit_id = _env("SPENDGUARD_UNIT_ID")
-    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
-    fx = _env("SPENDGUARD_FX_RATE_VERSION")
-    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
-    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
-
-    print(f"[demo] connecting to sidecar at {socket_path}")
-    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
-    client: SpendGuardClient | None = None
-    last_err: BaseException | None = None
-    while time.monotonic() < deadline:
-        try:
-            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
-            await c.connect()
-            await c.handshake()
-            client = c
-            break
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            await asyncio.sleep(1)
-    if client is None:
-        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
-        return 3
-
-    unit = common_pb2.UnitRef(
-        unit_id=unit_id, token_kind="output_token", model_family="gemini-2.0-flash"
-    )
-    pricing = common_pb2.PricingFreeze(
-        pricing_version=pricing_version,
-        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
-        fx_rate_version=fx,
-        unit_conversion_version=unit_conv,
-    )
-
-    cb = SpendGuardAdkCallback(
-        client=client,
-        budget_id=budget_id,
-        window_instance_id=window_id,
-        unit=unit,
-        pricing=pricing,
-        claim_estimator=lambda req: [
-            common_pb2.BudgetClaim(
-                budget_id=budget_id,
-                unit=unit,
-                amount_atomic="100",
-                direction=common_pb2.BudgetClaim.DEBIT,
-                window_instance_id=window_id,
-            )
-        ],
-    )
-
-    # Duck-typed request/response — mirrors the ADK LlmRequest /
-    # LlmResponse shape without requiring google-adk in the demo image.
-    run_id = str(new_uuid7())
-    part = SimpleNamespace(text="hello stub", function_call=None, function_response=None)
-    content = SimpleNamespace(role="user", parts=[part])
-    req = SimpleNamespace(model="gemini-2.0-flash", contents=[content])
-    ctx = SimpleNamespace(invocation_id=run_id, state={})
-
-    print(f"[demo] adk stub run_id={run_id}")
-    await cb(ctx, req)
-
-    usage = SimpleNamespace(
-        total_token_count=42,
-        prompt_token_count=None,
-        candidates_token_count=None,
-        total_tokens=None,
-    )
-    resp = SimpleNamespace(
-        usage_metadata=usage,
-        response_id="stub-resp-1",
-        candidates=[],
-        error_code=None,
-        error_message=None,
-    )
-    await cb(ctx, resp)
-    print("[demo] agent_real_adk_stub run completed: ALLOW path")
-    print("[demo] agent_real_adk_stub run completed: DENY path (model not called)")
-    await client.close()
-    return 0
+    """No-Gemini-key variant of agent_real_adk — delegates to the genuine
+    LiteLlm-backed run_adk_mode (which already needs NO GOOGLE_API_KEY: it
+    routes through litellm to the counting-stub). No SimpleNamespace fakes."""
+    return await run_adk_mode()
 
 
 # ---------------------------------------------------------------------------

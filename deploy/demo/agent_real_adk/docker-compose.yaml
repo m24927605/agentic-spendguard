@@ -192,11 +192,10 @@ services:
       SPENDGUARD_HANDSHAKE_TIMEOUT_MS: "30000"
       SPENDGUARD_COUNTING_STUB_URL: "http://counting-stub:8765"
       SPENDGUARD_DEMO_MODE: "agent_real_adk"
-      # GOOGLE_API_KEY threaded from the host env; if not present the
-      # driver fails fast with exit 8 (matching the langchain demo's
-      # OPENAI_API_KEY check). For CI without a key, use
-      # DEMO_MODE=agent_real_adk_stub instead.
-      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      # The driver uses ADK's LiteLlm model (litellm → OpenAI-shape) pointed
+      # at the counting-stub — no GOOGLE_API_KEY / real Gemini needed.
+      OPENAI_API_KEY: "sk-spendguard-demo-stub"
+      OPENAI_BASE_URL: "http://counting-stub:8765/v1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_CACHE_DIR: "off"
     volumes:
@@ -225,11 +224,11 @@ services:
         fi
         . /opt/venv/bin/activate
 
-        echo "[adk-runner] installing in-tree spendguard-sdk[adk]..."
-        # The SDK lives at /opt/spendguard/sdk/python; install editable
-        # so the demo always reflects the current SDK shape (parity with
-        # the .NET runner's project-reference wire-up).
-        pip install -e '/opt/spendguard/sdk/python[adk]'
+        echo "[adk-runner] installing in-tree spendguard-sdk[adk] + litellm..."
+        # The SDK lives at /opt/spendguard/sdk/python; install editable so the
+        # demo always reflects the current SDK shape. litellm backs ADK's
+        # LiteLlm model (the genuine, no-Gemini-key transport to the stub).
+        pip install -e '/opt/spendguard/sdk/python[adk]' 'litellm'
 
         echo "[adk-runner] sidecar UDS ready check..."
         for i in $$(seq 1 60); do

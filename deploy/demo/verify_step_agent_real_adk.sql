@@ -82,6 +82,13 @@ BEGIN
     IF v_commit < 1 THEN
         RAISE EXCEPTION 'COV_D19_GATE: ledger_transactions.commit_estimated >= 1 expected (ALLOW), got %', v_commit;
     END IF;
+    -- The live driver now ALWAYS runs a real DENY turn: a real LlmAgent call
+    -- with a 2B raw claim hits the contract hard-cap-deny rule; the sidecar
+    -- records a denied_decision before before_model_callback returns the
+    -- synthetic SPENDGUARD_DENY LlmResponse. No fabrication.
+    IF v_denied < 1 THEN
+        RAISE EXCEPTION 'COV_D19_GATE: ledger_transactions.denied_decision >= 1 expected (real DENY turn), got %', v_denied;
+    END IF;
 
     RAISE NOTICE 'COV_D19 LEDGER OK: reserve=% commit=% denied=%',
         v_reserve, v_commit, v_denied;

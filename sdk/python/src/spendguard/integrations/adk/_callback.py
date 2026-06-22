@@ -279,14 +279,25 @@ class SpendGuardAdkCallback:
 
     async def __call__(
         self,
-        callback_context: Any,
-        payload: Any,
+        callback_context: Any = None,
+        payload: Any = None,
+        *,
+        llm_request: Any = None,
+        llm_response: Any = None,
+        **_kwargs: Any,
     ) -> Any:
         """ADK callback entry point. Dispatches PRE vs POST by payload type.
 
         Returns ``None`` on the ALLOW PRE path (continue to model), a
         synthetic ``LlmResponse`` on the DENY PRE path (short-circuit),
         and ``None`` on the POST path.
+
+        ADK 1.35+ invokes the model callbacks with KEYWORD arguments —
+        ``before_model_callback(callback_context=..., llm_request=...)`` and
+        ``after_model_callback(callback_context=..., llm_response=...)`` — so
+        we accept ``llm_request`` / ``llm_response`` and normalise them to the
+        single ``payload`` the dispatch below discriminates on (older /
+        positional callers and the unit suite still pass ``payload``).
 
         Dispatch order:
           1. ``isinstance(payload, LlmRequest)`` — fast path when ADK
@@ -296,6 +307,8 @@ class SpendGuardAdkCallback:
           3. Shape-based fallback — for unit tests with SimpleNamespace
              stubs.
         """
+        if payload is None:
+            payload = llm_request if llm_request is not None else llm_response
         # Fast path: real ADK types available.
         if _RealLlmRequest is not None and isinstance(payload, _RealLlmRequest):
             return await self._before(callback_context, payload)
