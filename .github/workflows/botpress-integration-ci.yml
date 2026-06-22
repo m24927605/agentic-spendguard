@@ -10,10 +10,12 @@
 #   2. Build the @spendguard/sdk workspace dependency (its dist/ is gitignored,
 #      and the integration imports its runtime helpers — computePromptHash,
 #      deriveIdempotencyKey, newUuid7 — so the dist must exist before tests).
-#   3. Generate the Botpress `.botpress` typings via `bp build` (offline
-#      codegen from integration.definition.ts; `.botpress/` is gitignored).
-#   4. Lint (biome via dlx), typecheck (tsc x2), build (tsup), unit tests
-#      (vitest).
+#   3. Lint (biome via dlx), typecheck (tsc x2), build (tsup), unit tests
+#      (vitest), resolving `import * as bp from '.botpress'` against the
+#      COMMITTED `.botpress/` typings. CI does NOT run `bp build`: although
+#      it claims offline, the @botpress/cli reaches Botpress Cloud and has
+#      hung to the 6h job ceiling. Regenerate locally with `pnpm bp:build`
+#      and commit `.botpress/` when integration.definition.ts changes.
 #
 # The Docker / real-Botpress-server integration tier is intentionally NOT run
 # here: the previous hook-based integration tests targeted an architecture
@@ -38,6 +40,7 @@ on:
 jobs:
   unit-tier:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
     steps:
@@ -64,12 +67,8 @@ jobs:
         # gitignored, so build it before typecheck/test resolve the package.
         run: pnpm --filter @spendguard/sdk run build
 
-      - name: Generate Botpress typings (offline codegen)
-        # `bp build` reads integration.definition.ts and generates the
-        # .botpress/ typings the runtime imports as `import * as bp from
-        # '.botpress'`. Fully offline — no Botpress Cloud login required.
-        working-directory: integrations/botpress
-        run: pnpm exec bp build -y
+      # NOTE: no `bp build` step — `.botpress/` typings are committed; running
+      # the codegen in CI has hung to the 6h ceiling reaching Botpress Cloud.
 
       - name: Lint
         # The root pnpm-lock.yaml resolved @biomejs/biome's platform binary for

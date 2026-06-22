@@ -44,6 +44,7 @@ jobs:
   template:
     name: helm lint + template gates
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -115,11 +116,13 @@ jobs:
   kind:
     name: kind cluster install (demo profile)
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     # Slow job: spins up kind + postgres + helm install + waits for pods
-    # Ready. It is intentionally kept out of push/PR runs; cold building
-    # 11 Rust service images on GitHub hosted runners routinely dominates
-    # CI latency. Run it manually or nightly, using already-published
-    # sha-<commit> images by default.
+    # Ready. Kept out of push/PR runs. Nightly (schedule) BUILDS the service
+    # images in-job and kind-loads them — self-contained, with no dependency
+    # on a published sha-<HEAD> image (which often does not exist because HEAD
+    # is a docs commit, or publishing was gated). Manual dispatch can choose
+    # image_source=published to validate already-published images instead.
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_kind_e2e)
     steps:
       - name: Checkout
@@ -149,7 +152,9 @@ jobs:
           kubectl version --client
 
       - name: Log in to GHCR
-        if: github.event_name == 'schedule' || inputs.image_source == 'published'
+        # Only needed when actually PULLING published images. The nightly
+        # schedule builds in-job (image_source=build) and needs no registry.
+        if: inputs.image_source == 'published'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -176,8 +181,11 @@ jobs:
               ;;
           esac
         env:
-          IMAGE_SOURCE: ${{ inputs.image_source || 'published' }}
-        timeout-minutes: 60
+          # Nightly schedule → build images in-job + kind-load (self-contained,
+          # never hits "manifest unknown" on a missing sha-<HEAD> image).
+          # workflow_dispatch honors the chosen input; default elsewhere is published.
+          IMAGE_SOURCE: ${{ inputs.image_source || (github.event_name == 'schedule' && 'build' || 'published') }}
+        timeout-minutes: 75
 
       - name: Dump pod state on failure
         if: failure()
