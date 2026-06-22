@@ -27,6 +27,7 @@ default = ["uds-dev"]
 uds-dev = []
 
 [dependencies]
+time = { version = "=0.3.49", default-features = false }  # pin: 0.3.50 is broken (references time_macros::timestamp absent in its paired time-macros 0.2.29); float again once a fixed 0.3.51+ ships
 # gRPC + protobuf. tonic 0.12 / prost 0.13 — workspace-aligned with
 # services/egress_proxy and services/sidecar so the shared
 # spendguard-provider-routing crate (and any future direct sidecar adapter

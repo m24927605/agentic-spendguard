@@ -10,6 +10,7 @@ name = "spendguard-ttl-sweeper"
 path = "src/main.rs"
 
 [dependencies]
+time = { version = "=0.3.49", default-features = false }  # pin: 0.3.50 is broken (references time_macros::timestamp absent in its paired time-macros 0.2.29); float again once a fixed 0.3.51+ ships
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.12", features = ["tls", "transport"] }
 prost = "0.13"

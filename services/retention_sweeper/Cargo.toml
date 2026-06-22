@@ -14,6 +14,7 @@ name = "spendguard_retention_sweeper"
 path = "src/lib.rs"
 
 [dependencies]
+time = { version = "=0.3.49", default-features = false }  # pin: 0.3.50 is broken (references time_macros::timestamp absent in its paired time-macros 0.2.29); float again once a fixed 0.3.51+ ships
 
 # Direct rustls dep so main() can call CryptoProvider::install_default()
 rustls = "0.23"
