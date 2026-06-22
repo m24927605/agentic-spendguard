@@ -19,6 +19,5 @@ packages:
   - "sdk/typescript-ag-ui"
   - "sdk/typescript-mastra"
   - "integrations/botpress"
-  - "integrations/flowise"
   - "integrations/openclaw-provider-plugin"
   - "docs/site-v2"

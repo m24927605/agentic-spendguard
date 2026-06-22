@@ -47,3 +47,9 @@ node_modules/
 docs/launches/outreach-list.md
 
 .ait/
+
+# integrations/flowise builds STANDALONE (pnpm --ignore-workspace, split from the
+# root workspace 2026-06-22). Its lockfile pulls the Flowise host's heavy
+# flowise-components peer tree; keep it out of the repo so those CVEs never
+# re-enter a committed lockfile. CI resolves it fresh on each flowise-v* release.
+integrations/flowise/pnpm-lock.yaml

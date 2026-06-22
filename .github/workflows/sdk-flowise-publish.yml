@@ -5,9 +5,11 @@
 #         with bypass-2FA) authenticates the publish; --provenance attaches a
 #         signed build attestation from GitHub Actions.
 #
-# Source: integrations/flowise/ (a pnpm workspace member). Depends on
-# @spendguard/sdk, so the SDK is built first to emit the .d.ts the typecheck
-# resolves against.
+# Source: integrations/flowise/ — a STANDALONE package (NOT a pnpm workspace
+# member; split out 2026-06-22 so the Flowise host's heavy `flowise-components`
+# peer tree no longer pollutes the core SDK workspace lockfile). It builds and
+# typechecks against the PUBLISHED @spendguard/sdk + @spendguard/langchain +
+# flowise-components peers, installed standalone via `pnpm --ignore-workspace`.
 
 name: Publish @spendguard/flowise-nodes to npm
 
@@ -47,15 +49,14 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          cache-dependency-path: integrations/flowise/package.json
 
-      - name: Install deps (workspace-aware, frozen lockfile)
-        run: pnpm install --frozen-lockfile
-
-      - name: Build @spendguard/sdk (workspace dependency)
-        # The adapter typechecks against @spendguard/sdk's emitted .d.ts in
-        # dist/; the SDK dist is gitignored, so build it before typecheck.
-        run: pnpm --filter @spendguard/sdk run build
+      - name: Install deps (standalone — not a workspace member)
+        # --ignore-workspace: resolve ONLY integrations/flowise's own devDeps +
+        # peers (@spendguard/sdk, @spendguard/langchain, flowise-components) from
+        # npm, instead of installing the whole root workspace. This is what keeps
+        # the Flowise host's heavy peer tree out of the core SDK lockfile.
+        run: pnpm install --ignore-workspace
 
       - name: Lint
         # biome native binary is darwin-only in the root lockfile; dlx fetches the Linux build.
