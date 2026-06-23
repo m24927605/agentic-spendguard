@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.6.1 — 2026-06-23
+
+Patch release: framework-drift and deny-conformance fixes for the in-process
+gating adapters. No public API added or removed; all changes are internal
+correctness fixes that make the adapters track newer framework versions and
+genuinely block the provider call on DENY. Also fixes a runtime-version desync
+(`spendguard.__version__` now reports the installed version).
+
+### Fixed
+
+- **`integrations.adk`** — support the ADK 1.35+ keyword-argument model
+  callback signature. `SpendGuardAdkCallback.__call__` now accepts the new
+  keyword-only `llm_request` / `llm_response` params (plus a `**kwargs`
+  catch-all) and normalises them to the single `payload` the PRE/POST dispatch
+  discriminates on. Older positional callers and the unit suite are unaffected
+  (additive, backward-compatible).
+- **`integrations.agno`** — corrected deny semantics for agno 2.6.x. The
+  `DecisionDenied` → `InputCheckError` wrap that halts the model before the
+  vendor SDK is unchanged and remains load-bearing, but a DENY surfaces as
+  `Agent.arun()` returning `RunOutput(status=RunStatus.error)` rather than a
+  propagated exception — callers must detect deny via `RunOutput.status`, not
+  by catching `DecisionDenied`. Documentation-only change.
+- **`integrations.beeai`** — four fixes for BeeAI 0.1.x `ChatModel.run`:
+  (1) `_stable_call_key` strips a leading `run.` prefix so the Run-level mirror
+  and inner backend emit collapse to one call key; (2) a race-safe synchronous
+  inflight placeholder (claimed before the `request_decision` await, popped on
+  any exception) stops the concurrently-dispatched duplicate `start` from
+  double-reserving the budget; (3) the event predicate now also matches a
+  `chat` path segment, not just `llm`; (4) usage extraction reads
+  `ChatModelSuccessEvent.value.usage` so the commit estimate is non-zero and
+  the reservation no longer leaks.
+- **`integrations.letta`** — gate Letta 0.16.x's low-level
+  `LLMClientBase.request_async` provider call (the 0.8.0-era `send_llm_request`
+  surface was removed). Same fail-closed PRE `request_decision` (DENY raises
+  `DecisionDenied` before any provider HTTP) → inner call → POST. Token and
+  provider-event-id extraction are now dict-aware to read the raw provider
+  `dict` that `request_async` returns, in addition to the object shape.
+- **`integrations.llamaindex`** — read token counts from pydantic provider
+  responses. A new `_coerce_mapping` helper normalises a non-`Mapping`
+  `response.raw` (e.g. the `ChatCompletion` / `CompletionUsage` pydantic
+  objects from `llama-index-llms-openai` on openai-python v1) via
+  `model_dump` / `dict` / `to_dict`, so real token counts are read instead of
+  0 (which previously failed the POST commit with
+  `estimated_amount_atomic must be > 0`).
+- **`integrations.strands`** — track the Strands GA (>=1.0)
+  `BeforeInvocationEvent` / `AfterInvocationEvent` shape, which exposes
+  `agent` / `messages` / `invocation_state` directly and has no
+  `event.invocation` wrapper or `invocation_id`. The adapter no longer raises
+  on the missing wrapper; it correlates the before/after pair via a
+  `_spendguard_invocation_id` stored in the shared `invocation_state` dict and
+  reads `model` from the agent.
+- Fixed `spendguard.__version__`, which was pinned at `"0.5.1"` and now matches
+  the package version.
+
 ## 0.6.0 — 2026-06-19
 
 ### Added
