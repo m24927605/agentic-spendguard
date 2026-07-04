@@ -17,6 +17,10 @@ from .fixture_outputs import (
 
 
 DEFAULT_ISSUER = "spiffe://spendguard.local/agentrust-exporter"
+EXPECTED_EVIDENCE_ROOTS = {
+    "allow": "sha256:a40343e65467451b5e0e234327a414fbf61b2cacff57fd41fa6804232c7194df",
+    "deny": "sha256:985f76783f37f66d6d5ce957c586f5d4b5dc2106bc1c0075eadd65d1982ebcd5",
+}
 
 
 class VerificationError(Exception):
@@ -57,7 +61,12 @@ def _validate_inputs(values: dict[str, str], fixture: str, bundle_id: str) -> No
         expected = entry.get("sha256") if isinstance(entry, dict) else None
         if not isinstance(rel, str) or not isinstance(expected, str):
             _raise("bundle_index_invalid", 2, "phase-2", f"/files/{index}")
-        actual = hashlib.sha256((bundle_root / rel).read_bytes()).hexdigest()
+        try:
+            actual = hashlib.sha256((bundle_root / rel).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise VerificationError(
+                Diagnostic("file_hash_mismatch", 4, "phase-6", f"/files/{index}/path")
+            ) from exc
         if actual != expected:
             _raise("file_hash_mismatch", 4, "phase-6", f"/files/{index}/sha256")
 
@@ -68,13 +77,18 @@ def _validate_inputs(values: dict[str, str], fixture: str, bundle_id: str) -> No
     ).hexdigest()
     if expected_root != f"sha256:{actual_root}":
         _raise("evidence_bundle_hash_mismatch", 4, "phase-6", "/evidence_bundle_hash")
+    if expected_root != EXPECTED_EVIDENCE_ROOTS[fixture]:
+        _raise("evidence_bundle_hash_mismatch", 4, "phase-6", "/evidence_bundle_hash")
 
     trust_store = _read_json(Path(values["trust_store"]), "trust_store_invalid", 2, "phase-7")
     keys = trust_store.get("keys") if isinstance(trust_store, dict) else None
     if not isinstance(keys, list) or not keys or keys[0].get("key_id") != "sg-ed25519-2026-06":
         _raise("trust_store_invalid", 2, "phase-7", "/keys/0/key_id")
 
-    key_bytes = Path(values["trace_signing_key"]).read_bytes()
+    try:
+        key_bytes = Path(values["trace_signing_key"]).read_bytes()
+    except OSError as exc:
+        raise VerificationError(Diagnostic("trace_key_invalid", 6, "phase-4")) from exc
     if b"-----BEGIN PRIVATE KEY-----" not in key_bytes:
         _raise("trace_key_invalid", 6, "phase-4", None)
 
@@ -82,6 +96,8 @@ def _validate_inputs(values: dict[str, str], fixture: str, bundle_id: str) -> No
 def _commit_outputs(values: dict[str, str], fixture: str, bundle_id: str) -> None:
     output_dir = Path(values["out_dir"]) / bundle_id
     output_root = output_dir.parent
+    if output_root.is_symlink():
+        _raise("output_target_invalid", 2, "phase-2", None)
     if output_dir.exists() or output_dir.is_symlink():
         _raise("output_target_invalid", 2, "phase-2", None)
 

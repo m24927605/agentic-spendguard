@@ -4,7 +4,9 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+import hashlib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -110,6 +112,59 @@ class PublicVerifyFixtureTest(unittest.TestCase):
         payload = json.loads(observed.stderr)
         self.assertEqual("file_hash_mismatch", payload["code"])
         self.assertEqual("phase-6", payload["phase"])
+
+    def test_rejects_coherent_fixture_tamper(self):
+        bundle_path = ROOT / "integrations" / "agentrust" / "examples" / "allow" / "bundle.json"
+        decision = ROOT / "integrations" / "agentrust" / "examples" / "allow" / "decision.json"
+        original_bundle = bundle_path.read_bytes()
+        original_decision = decision.read_bytes()
+        try:
+            mutated_decision = original_decision + b" "
+            decision.write_bytes(mutated_decision)
+            bundle = json.loads(original_bundle)
+            bundle["files"][0]["sha256"] = hashlib.sha256(mutated_decision).hexdigest()
+            preimage = dict(bundle)
+            preimage.pop("evidence_bundle_hash")
+            bundle["evidence_bundle_hash"] = "sha256:" + hashlib.sha256(
+                json.dumps(preimage, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            bundle_path.write_text(json.dumps(bundle, separators=(",", ":")), encoding="utf-8")
+            observed = run_verify("allow")
+        finally:
+            decision.write_bytes(original_decision)
+            bundle_path.write_bytes(original_bundle)
+
+        self.assertEqual(4, observed.returncode)
+        payload = json.loads(observed.stderr)
+        self.assertEqual("evidence_bundle_hash_mismatch", payload["code"])
+
+    def test_rejects_missing_fixture_file_without_traceback(self):
+        outcome = ROOT / "integrations" / "agentrust" / "examples" / "allow" / "outcome.json"
+        hidden = outcome.with_suffix(".json.hidden")
+        outcome.rename(hidden)
+        try:
+            observed = run_verify("allow")
+        finally:
+            hidden.rename(outcome)
+
+        self.assertEqual(4, observed.returncode)
+        self.assertEqual(b"", observed.stdout)
+        self.assertNotIn(b"Traceback", observed.stderr)
+        payload = json.loads(observed.stderr)
+        self.assertEqual("file_hash_mismatch", payload["code"])
+
+    def test_rejects_symlinked_output_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.rmtree(OUT_ROOT, ignore_errors=True)
+            OUT_ROOT.symlink_to(Path(tmp), target_is_directory=True)
+            try:
+                observed = run_verify("allow")
+            finally:
+                OUT_ROOT.unlink(missing_ok=True)
+
+        self.assertEqual(2, observed.returncode)
+        payload = json.loads(observed.stderr)
+        self.assertEqual("output_target_invalid", payload["code"])
 
     def test_non_default_manifest_issuer_is_preserved(self):
         issuer = "spiffe://agent.example/a"
