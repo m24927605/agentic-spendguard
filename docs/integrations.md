@@ -93,7 +93,7 @@ They are not framework adapters and do not add new runtime gates by themselves.
 
 | Ecosystem | Status | What gets exported | Spec |
 |---|---|---|---|
-| **AgenTrust** | Planned docs-first target; no Community approval yet | SpendGuard signed spend-control audit decisions as TRACE Level 0 software-only evidence, plus Agent Manifest artifact bindings for policy, tool catalog, evidence-bundle root, and build provenance hashes. Operator-supplied context is labeled separately from signed evidence; v1alpha1 makes no external connector claim. | [AgenTrust integration spec](specs/agentrust-integration-spec-v1alpha1.md) · [public docs](https://agenticspendguard.dev/docs/integrations/agentrust/) |
+| **AgenTrust** | Fixture-only docs-first MVP; no Community approval yet | Current repository support is a fixture smoke harness for committed allow/deny evidence, golden TRACE Level 0 outputs, and Agent Manifest artifact bindings. Full v1alpha1 verifier conformance, Linux path hardening, and final package guard scans are deferred before any upstream submission or stronger trust claim. | [AgenTrust integration spec](specs/agentrust-integration-spec-v1alpha1.md) · [public docs](https://agenticspendguard.dev/docs/integrations/agentrust/) |
 
 ---
 

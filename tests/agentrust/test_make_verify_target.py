@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import shutil
@@ -42,7 +43,7 @@ class MakeVerifyTargetTest(unittest.TestCase):
         self.assertEqual(1, len(reports))
         payload = reports[0].read_text()
         self.assertTrue(payload.endswith("\n"))
-        report = __import__("json").loads(payload)
+        report = json.loads(payload)
         self.assertEqual(
             [
                 "conformance_checks",
@@ -56,6 +57,23 @@ class MakeVerifyTargetTest(unittest.TestCase):
             list(report.keys()),
         )
         self.assertEqual("pass", report["status"])
+        self.assertEqual(
+            {
+                "artifact_preflight_envelope",
+                "event_type_binding",
+                "manifest_issuer_variant",
+                "private_parser_matrix",
+                "public_parser_matrix",
+            },
+            {
+                key
+                for key, value in report["conformance_checks"].items()
+                if value["status"] == "deferred_fixture_mvp"
+            },
+        )
+        self.assertEqual("pass", report["conformance_checks"]["fixture_identity"]["status"])
+        self.assertEqual("pass", report["conformance_checks"]["internal_guard"]["status"])
+        self.assertEqual("pass", report["conformance_checks"]["package_guard_surfaces"]["status"])
 
 
 if __name__ == "__main__":

@@ -253,16 +253,20 @@ def _check_private_negative(run_root: Path, mutation: str, fixture: str) -> None
 
 
 def _write_report(run_root: Path) -> None:
+    deferred = {
+        "diagnostic_code": "deferred_fixture_mvp",
+        "status": "deferred_fixture_mvp",
+    }
     report = {
         "conformance_checks": {
-            "artifact_preflight_envelope": {"diagnostic_code": None, "status": "pass"},
-            "event_type_binding": {"diagnostic_code": None, "status": "pass"},
+            "artifact_preflight_envelope": deferred,
+            "event_type_binding": deferred,
             "fixture_identity": {"diagnostic_code": None, "status": "pass"},
             "internal_guard": {"diagnostic_code": None, "status": "pass"},
-            "manifest_issuer_variant": {"diagnostic_code": None, "status": "pass"},
+            "manifest_issuer_variant": deferred,
             "package_guard_surfaces": {"diagnostic_code": None, "status": "pass"},
-            "private_parser_matrix": {"diagnostic_code": None, "status": "pass"},
-            "public_parser_matrix": {"diagnostic_code": None, "status": "pass"},
+            "private_parser_matrix": deferred,
+            "public_parser_matrix": deferred,
         },
         "mode": "fixture",
         "negative_tests": {

@@ -1,7 +1,9 @@
 # AgenTrust integration implementation plan v1alpha1
 
 Status: Plan stage resolved by Staff+ Expert Recovery Cycle after the approved
-Spec gate; proceed to Task implementation.
+Spec gate. Task stage later advanced as a fixture-only docs-first MVP by
+`docs/specs/agentrust-task-recovery-summary-v1alpha1.md`; full verifier
+conformance remains deferred work.
 
 ## Source of truth
 
@@ -607,6 +609,37 @@ source and artifact lanes, clears build artifacts before each lane transition,
 requires `PYTHONPATH` isolation for installed-wheel checks, and pins Linux CI to
 non-root Ubuntu 24.04 or Debian 12. Per `AGENTS.md`, this resolves the Plan
 stage and advances the workflow to Task implementation.
+
+## Staff+ Task Recovery Summary
+
+Task review reached the fifth failed iteration. The Staff+ Expert Recovery Cycle
+for architecture/spec scope deduplicated the remaining blockers into four root
+causes:
+
+- cryptographic verification depth: the failed review implementation did not
+  satisfy the full v1alpha1 contract for raw CloudEvent signed-byte
+  reconstruction and Ed25519 verification from the trust store;
+- negative-test integrity: make-only negatives prove deterministic diagnostics
+  and report wiring more than end-to-end validator behavior;
+- report truthfulness: aggregate report entries can be marked `pass` without
+  proof that the corresponding package/public-surface guard fully ran against
+  the required surfaces; and
+- hardening gap: Linux dirfd/no-follow path safety, output commit hardening,
+  source/artifact isolation, and final package guard scans are incomplete.
+
+The Staff+ decision is to advance this Task stage only as a fixture-only
+docs-first MVP. This approves the public parser, stdlib build backend, committed
+allow/deny fixture checks, golden output generation, private env-gated harness,
+and make smoke report as useful scaffolding. It does not approve upstream
+Community submission, general artifact verification, live evidence verification,
+production key distribution, or stronger trust claims.
+
+The deferred conformance track is recorded in
+`docs/specs/agentrust-task-recovery-summary-v1alpha1.md`. Before any upstream
+submission or stronger public claim, complete full v1alpha1 signed-byte
+reconstruction, real verifier-path negative mutations, truth-preserving
+aggregate reporting, Linux path/output hardening, final artifact-lane package
+scans, and supported Linux CI.
 
 ## Review gates
 

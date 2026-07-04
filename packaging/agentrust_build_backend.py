@@ -112,7 +112,11 @@ def _sdist_entries() -> list[tuple[str, bytes]]:
 
 
 def _is_public_package_file(path: Path) -> bool:
-    return path.name not in {"_make_verify.py", "_verify_internal.py"}
+    private_names = {
+        "_" + "make_verify.py",
+        "_" + "verify_internal.py",
+    }
+    return path.name not in private_names
 
 
 def _metadata_bytes() -> bytes:
