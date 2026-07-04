@@ -14,14 +14,34 @@ from .fixture_outputs import ALL_OUTPUTS, BUNDLE_IDS, OUTPUT_BYTES, SELECTED_OUT
 ROOT = Path(__file__).resolve().parents[1]
 OUT_ROOT = ROOT / "integrations" / "agentrust" / "out"
 REPORT_ROOT = OUT_ROOT / ".verify-agentrust"
+PUBLIC_TRACE_KEY = (
+    ROOT
+    / "integrations"
+    / "agentrust"
+    / "test-private-keys"
+    / "spendguard-agentrust-fixture.test.ed25519.pem"
+)
+NEGATIVE_EXPECTATIONS = {
+    "missing_trace_signature": (5, "trace_package_validation_failed", "/signature"),
+    "mutated_policy_hash": (4, "policy_binding_mismatch", "/policy_bundle_hash"),
+    "mutated_signature": (3, "spendguard_signature_invalid", "/signature/value_base64url"),
+    "wrong_key": (3, "spendguard_signature_invalid", "/keys/0/public_key_base64url"),
+}
 
 
 def main() -> int:
     try:
+        run_root = _new_run_root()
+        _prepare_trace_key(run_root)
         _check_help()
         for fixture in ("allow", "deny"):
             _check_fixture(fixture)
-        _write_report()
+            _check_private_success(run_root, fixture)
+        _check_private_negative(run_root, "missing_trace_signature", "deny")
+        _check_private_negative(run_root, "mutated_policy_hash", "allow")
+        _check_private_negative(run_root, "mutated_signature", "allow")
+        _check_private_negative(run_root, "wrong_key", "deny")
+        _write_report(run_root)
     except AssertionError as exc:
         sys.stderr.write(str(exc))
         return 1
@@ -37,6 +57,12 @@ def _base_env() -> dict[str, str]:
     return env
 
 
+def _internal_env() -> dict[str, str]:
+    env = _base_env()
+    env["SPENDGUARD_AGENTRUST_INTERNAL_TEST_ROOT"] = "1"
+    return env
+
+
 def _run_public(*args: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         [sys.executable, "-m", "spendguard_agentrust", *args],
@@ -46,6 +72,29 @@ def _run_public(*args: str) -> subprocess.CompletedProcess[bytes]:
         stderr=subprocess.PIPE,
         check=False,
     )
+
+
+def _run_internal(*args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [sys.executable, "-m", "spendguard_agentrust._verify_internal", *args],
+        cwd=ROOT,
+        env=_internal_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def _new_run_root() -> Path:
+    run_root = REPORT_ROOT / f"run-{secrets.token_hex(8)}"
+    run_root.mkdir(parents=True, mode=0o700)
+    return run_root
+
+
+def _prepare_trace_key(run_root: Path) -> None:
+    trace_dir = run_root / ".trace-key"
+    trace_dir.mkdir(mode=0o700)
+    (trace_dir / "trace-exporter.test.ed25519.pem").write_bytes(PUBLIC_TRACE_KEY.read_bytes())
 
 
 def _check_help() -> None:
@@ -90,9 +139,56 @@ def _check_fixture(fixture: str) -> None:
     shutil.rmtree(output_dir, ignore_errors=True)
 
 
-def _write_report() -> None:
-    run_root = REPORT_ROOT / f"run-{secrets.token_hex(8)}"
-    run_root.mkdir(parents=True, mode=0o700)
+def _check_private_success(run_root: Path, fixture: str) -> None:
+    observed = _run_internal(
+        "verify",
+        "--bundle",
+        f"integrations/agentrust/examples/{fixture}",
+        "--trust-store",
+        "integrations/agentrust/examples/trust-store.json",
+        "--trace-signing-key",
+        _repo_relative(run_root / ".trace-key" / "trace-exporter.test.ed25519.pem"),
+        "--out-dir",
+        _repo_relative(run_root),
+        "--fixture",
+        fixture,
+    )
+    _assert_equal(0, observed.returncode, f"{fixture} private verifier exit")
+    _assert_equal(b"", observed.stdout, f"{fixture} private verifier stdout")
+    _assert_equal(b"", observed.stderr, f"{fixture} private verifier stderr")
+
+
+def _check_private_negative(run_root: Path, mutation: str, fixture: str) -> None:
+    mutation_root = run_root / ".mutations" / mutation / fixture
+    (mutation_root / "bundle").mkdir(parents=True)
+    (mutation_root / "out").mkdir()
+    (mutation_root / "trust-store.json").write_bytes(
+        (ROOT / "integrations" / "agentrust" / "examples" / "trust-store.json").read_bytes()
+    )
+    observed = _run_internal(
+        "verify",
+        "--bundle",
+        _repo_relative(mutation_root / "bundle"),
+        "--trust-store",
+        _repo_relative(mutation_root / "trust-store.json"),
+        "--trace-signing-key",
+        _repo_relative(run_root / ".trace-key" / "trace-exporter.test.ed25519.pem"),
+        "--out-dir",
+        _repo_relative(mutation_root / "out"),
+        "--fixture",
+        fixture,
+        "--mutation",
+        mutation,
+    )
+    expected_exit, expected_code, expected_pointer = NEGATIVE_EXPECTATIONS[mutation]
+    _assert_equal(expected_exit, observed.returncode, f"{mutation} exit")
+    _assert_equal(b"", observed.stdout, f"{mutation} stdout")
+    payload = json.loads(observed.stderr)
+    _assert_equal(expected_code, payload["code"], f"{mutation} code")
+    _assert_equal(expected_pointer, payload["json_pointer"], f"{mutation} pointer")
+
+
+def _write_report(run_root: Path) -> None:
     report = {
         "conformance_checks": {
             "artifact_preflight_envelope": {"diagnostic_code": None, "status": "pass"},
@@ -161,6 +257,10 @@ def _write_report() -> None:
         json.dumps(report, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
+
+
+def _repo_relative(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
 
 
 def _assert_equal(expected, observed, label: str) -> None:
