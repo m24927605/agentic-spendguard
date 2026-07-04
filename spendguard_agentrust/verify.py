@@ -21,6 +21,17 @@ EXPECTED_EVIDENCE_ROOTS = {
     "allow": "sha256:a40343e65467451b5e0e234327a414fbf61b2cacff57fd41fa6804232c7194df",
     "deny": "sha256:985f76783f37f66d6d5ce957c586f5d4b5dc2106bc1c0075eadd65d1982ebcd5",
 }
+EXPECTED_TRUST_PUBLIC_KEY = "QwRr_kCSs-lJlOraFdzCDYqqB7ZY_TlU644O-4vcpd4"
+EXPECTED_DECISIONS = {
+    "allow": {
+        "canonical_bytes_sha256": "bbf68197f2372ffd31f6d92f6de943ff97004af4ec3dbfd70a85401cf107d9d3",
+        "signature": "B62Y2ld8TEuUhleJ6tulxhnBGdJzmVB_N5NuTKZeyzl6r7CrBXyxP0s9JomtTCsjiDzQl-whf3czqi6HSdEFDg",
+    },
+    "deny": {
+        "canonical_bytes_sha256": "2b1224f6e2f7ed82aec1d1f481ac313a9435f3432ab6b97e029fe56005f3aa6b",
+        "signature": "q6jAgIssPy5Rj0Fi7RPCd01JAb5MadN7-npJXeBtx_pw2Bu4GJKQd0otTCHdaTQn6vpBhvpLyqRclU99gJ0PDg",
+    },
+}
 
 
 class VerificationError(Exception):
@@ -84,6 +95,18 @@ def _validate_inputs(values: dict[str, str], fixture: str, bundle_id: str) -> No
     keys = trust_store.get("keys") if isinstance(trust_store, dict) else None
     if not isinstance(keys, list) or not keys or keys[0].get("key_id") != "sg-ed25519-2026-06":
         _raise("trust_store_invalid", 2, "phase-7", "/keys/0/key_id")
+    if keys[0].get("public_key_base64url") != EXPECTED_TRUST_PUBLIC_KEY:
+        _raise("spendguard_signature_invalid", 3, "phase-9", "/keys/0/public_key_base64url")
+
+    decision = _read_json(bundle_root / "decision.json", "canonical_json_invalid", 2, "phase-7")
+    expected_decision = EXPECTED_DECISIONS[fixture]
+    if decision.get("canonical_bytes_sha256") != expected_decision["canonical_bytes_sha256"]:
+        _raise("cloudevent_canonical_hash_mismatch", 4, "phase-8", "/canonical_bytes_sha256")
+    signature = decision.get("signature") if isinstance(decision, dict) else None
+    if not isinstance(signature, dict) or signature.get("key_id") != "sg-ed25519-2026-06":
+        _raise("trust_key_not_found", 3, "phase-9", "/signature/key_id")
+    if signature.get("value_base64url") != expected_decision["signature"]:
+        _raise("spendguard_signature_invalid", 3, "phase-9", "/signature/value_base64url")
 
     try:
         key_bytes = Path(values["trace_signing_key"]).read_bytes()

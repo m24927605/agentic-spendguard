@@ -153,6 +153,49 @@ class PublicVerifyFixtureTest(unittest.TestCase):
         payload = json.loads(observed.stderr)
         self.assertEqual("file_hash_mismatch", payload["code"])
 
+    def test_rejects_wrong_trust_key_with_same_key_id(self):
+        trust_store = ROOT / "integrations" / "agentrust" / "examples" / "trust-store.json"
+        original = trust_store.read_bytes()
+        try:
+            payload = json.loads(original)
+            payload["keys"][0]["public_key_base64url"] = "GX9rI-FshTLGq8g4-s1ep4m-DHaykgM0A5v6iz02jWE"
+            trust_store.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            observed = run_verify("allow")
+        finally:
+            trust_store.write_bytes(original)
+
+        self.assertEqual(3, observed.returncode)
+        payload = json.loads(observed.stderr)
+        self.assertEqual("spendguard_signature_invalid", payload["code"])
+        self.assertEqual("/keys/0/public_key_base64url", payload["json_pointer"])
+
+    def test_rejects_coherent_signature_tamper_at_fixture_root(self):
+        bundle_path = ROOT / "integrations" / "agentrust" / "examples" / "allow" / "bundle.json"
+        decision = ROOT / "integrations" / "agentrust" / "examples" / "allow" / "decision.json"
+        original_bundle = bundle_path.read_bytes()
+        original_decision = decision.read_bytes()
+        try:
+            payload = json.loads(original_decision)
+            payload["signature"]["value_base64url"] = "A" + payload["signature"]["value_base64url"][1:]
+            mutated_decision = json.dumps(payload, separators=(",", ":")).encode()
+            decision.write_bytes(mutated_decision)
+            bundle = json.loads(original_bundle)
+            bundle["files"][0]["sha256"] = hashlib.sha256(mutated_decision).hexdigest()
+            preimage = dict(bundle)
+            preimage.pop("evidence_bundle_hash")
+            bundle["evidence_bundle_hash"] = "sha256:" + hashlib.sha256(
+                json.dumps(preimage, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            bundle_path.write_text(json.dumps(bundle, separators=(",", ":")), encoding="utf-8")
+            observed = run_verify("allow")
+        finally:
+            decision.write_bytes(original_decision)
+            bundle_path.write_bytes(original_bundle)
+
+        self.assertEqual(4, observed.returncode)
+        payload = json.loads(observed.stderr)
+        self.assertEqual("evidence_bundle_hash_mismatch", payload["code"])
+
     def test_rejects_symlinked_output_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             shutil.rmtree(OUT_ROOT, ignore_errors=True)
