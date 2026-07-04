@@ -6,7 +6,7 @@ import sys
 from urllib.parse import unquote_to_bytes
 
 from .diagnostics import Diagnostic, diagnostic_json
-from .verify import verify_public
+from .verify import VerificationError, verify_public
 
 
 HELP_STDOUT = (
@@ -123,7 +123,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(diagnostic_json(parsed.diagnostic))
         return parsed.diagnostic.exit_code
 
-    sys.stdout.buffer.write(verify_public(parsed.values))
+    try:
+        sys.stdout.buffer.write(verify_public(parsed.values))
+    except VerificationError as exc:
+        sys.stderr.write(diagnostic_json(exc.diagnostic))
+        return exc.diagnostic.exit_code
     return 0
 
 

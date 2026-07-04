@@ -19,14 +19,8 @@ ALL_OUTPUTS = [*SELECTED_OUTPUTS, "verification-report.json"]
 
 
 def run_verify(fixture):
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT)
-    env["PYTHONNOUSERSITE"] = "1"
-    return subprocess.run(
+    return run_verify_args(
         [
-            sys.executable,
-            "-m",
-            "spendguard_agentrust",
             "verify",
             "--bundle",
             f"integrations/agentrust/examples/{fixture}",
@@ -36,7 +30,16 @@ def run_verify(fixture):
             "integrations/agentrust/test-private-keys/spendguard-agentrust-fixture.test.ed25519.pem",
             "--out-dir",
             "integrations/agentrust/out",
-        ],
+        ]
+    )
+
+
+def run_verify_args(args):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT)
+    env["PYTHONNOUSERSITE"] = "1"
+    return subprocess.run(
+        [sys.executable, "-m", "spendguard_agentrust", *args],
         cwd=ROOT,
         env=env,
         text=False,
@@ -80,6 +83,55 @@ class PublicVerifyFixtureTest(unittest.TestCase):
                         (output_dir / name).read_bytes(),
                         name,
                     )
+
+    def test_rejects_existing_final_output(self):
+        output_dir = OUT_ROOT / "demo-allow"
+        output_dir.mkdir(parents=True)
+
+        observed = run_verify("allow")
+
+        self.assertEqual(2, observed.returncode)
+        self.assertEqual(b"", observed.stdout)
+        payload = json.loads(observed.stderr)
+        self.assertEqual("output_target_invalid", payload["code"])
+        self.assertEqual("phase-2", payload["phase"])
+
+    def test_rejects_stale_fixture_hash(self):
+        decision = ROOT / "integrations" / "agentrust" / "examples" / "allow" / "decision.json"
+        original = decision.read_bytes()
+        try:
+            decision.write_bytes(original + b" ")
+            observed = run_verify("allow")
+        finally:
+            decision.write_bytes(original)
+
+        self.assertEqual(4, observed.returncode)
+        self.assertEqual(b"", observed.stdout)
+        payload = json.loads(observed.stderr)
+        self.assertEqual("file_hash_mismatch", payload["code"])
+        self.assertEqual("phase-6", payload["phase"])
+
+    def test_non_default_manifest_issuer_is_preserved(self):
+        issuer = "spiffe://agent.example/a"
+        observed = run_verify_args(
+            [
+                "verify",
+                "--bundle",
+                "integrations/agentrust/examples/allow",
+                "--trust-store",
+                "integrations/agentrust/examples/trust-store.json",
+                "--trace-signing-key",
+                "integrations/agentrust/test-private-keys/spendguard-agentrust-fixture.test.ed25519.pem",
+                "--out-dir",
+                "integrations/agentrust/out",
+                "--manifest-issuer",
+                issuer,
+            ]
+        )
+
+        self.assertEqual(0, observed.returncode)
+        manifest = json.loads((OUT_ROOT / "demo-allow" / "agent-manifest.json").read_text())
+        self.assertEqual(issuer, manifest["issuer"])
 
 
 if __name__ == "__main__":
