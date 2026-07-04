@@ -6,6 +6,7 @@ import sys
 from urllib.parse import unquote_to_bytes
 
 from .diagnostics import Diagnostic, diagnostic_json
+from .verify import verify_public
 
 
 HELP_STDOUT = (
@@ -122,9 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(diagnostic_json(parsed.diagnostic))
         return parsed.diagnostic.exit_code
 
-    diagnostic = Diagnostic("package_missing", exit_code=6, phase="phase-4")
-    sys.stderr.write(diagnostic_json(diagnostic))
-    return diagnostic.exit_code
+    sys.stdout.buffer.write(verify_public(parsed.values))
+    return 0
 
 
 def _diagnostic(code: str) -> ParseResult:
