@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,9 @@ import shutil
 import secrets
 import subprocess
 import sys
+import tarfile
+import tempfile
+import zipfile
 
 from .fixture_outputs import ALL_OUTPUTS, BUNDLE_IDS, OUTPUT_BYTES, SELECTED_OUTPUTS
 
@@ -27,12 +31,20 @@ NEGATIVE_EXPECTATIONS = {
     "mutated_signature": (3, "spendguard_signature_invalid", "/signature/value_base64url"),
     "wrong_key": (3, "spendguard_signature_invalid", "/keys/0/public_key_base64url"),
 }
+FORBIDDEN_ARTIFACT_CONTENT_MARKERS = {
+    b"-----BEGIN PRIVATE KEY-----": "private key material",
+}
+FORBIDDEN_ARTIFACT_MEMBER_MARKERS = {
+    b"_verify_internal": "private verifier module",
+    b"_make_verify": "make-only verifier module",
+}
 
 
 def main() -> int:
     try:
         run_root = _new_run_root()
         _prepare_trace_key(run_root)
+        _check_package_guard()
         _check_help()
         for fixture in ("allow", "deny"):
             _check_fixture(fixture)
@@ -95,6 +107,58 @@ def _prepare_trace_key(run_root: Path) -> None:
     trace_dir = run_root / ".trace-key"
     trace_dir.mkdir(mode=0o700)
     (trace_dir / "trace-exporter.test.ed25519.pem").write_bytes(PUBLIC_TRACE_KEY.read_bytes())
+
+
+def _check_package_guard() -> None:
+    backend = _load_build_backend()
+    with tempfile.TemporaryDirectory() as temp:
+        out = Path(temp)
+        wheel_name = backend.build_wheel(str(out))
+        sdist_name = backend.build_sdist(str(out))
+        for name in (wheel_name, sdist_name):
+            artifact = out / name
+            _scan_package_artifact_bytes(name, artifact.read_bytes())
+            _scan_package_archive_members(artifact)
+
+
+def _load_build_backend():
+    path = ROOT / "packaging" / "agentrust_build_backend.py"
+    spec = importlib.util.spec_from_file_location("agentrust_build_backend_guard", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _scan_package_artifact_bytes(label: str, data: bytes) -> None:
+    for marker, description in FORBIDDEN_ARTIFACT_CONTENT_MARKERS.items():
+        if marker in data:
+            raise AssertionError(f"package guard failed: {label} contains {description}")
+
+
+def _scan_package_archive_members(path: Path) -> None:
+    if path.suffix == ".whl":
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                _scan_package_member_name(path.name, name)
+                _scan_package_artifact_bytes(f"{path.name}:{name}", archive.read(name))
+        return
+
+    if path.name.endswith(".tar.gz"):
+        with tarfile.open(path, "r:gz") as archive:
+            for member in archive.getmembers():
+                _scan_package_member_name(path.name, member.name)
+                if member.isfile():
+                    extracted = archive.extractfile(member)
+                    if extracted is not None:
+                        _scan_package_artifact_bytes(f"{path.name}:{member.name}", extracted.read())
+
+
+def _scan_package_member_name(label: str, name: str) -> None:
+    encoded = name.encode("utf-8")
+    for marker, description in FORBIDDEN_ARTIFACT_MEMBER_MARKERS.items():
+        if marker in encoded:
+            raise AssertionError(f"package guard failed: {label} member {name} exposes {description}")
 
 
 def _check_help() -> None:

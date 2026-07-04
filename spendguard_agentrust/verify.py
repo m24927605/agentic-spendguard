@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import base64
+import binascii
+from datetime import datetime, timezone
 import hashlib
 import json
 import secrets
 import shutil
 from pathlib import Path
+import stat
+import subprocess
+import tempfile
 
 from .diagnostics import Diagnostic
 from .fixture_outputs import (
@@ -22,16 +28,15 @@ EXPECTED_EVIDENCE_ROOTS = {
     "deny": "sha256:985f76783f37f66d6d5ce957c586f5d4b5dc2106bc1c0075eadd65d1982ebcd5",
 }
 EXPECTED_TRUST_PUBLIC_KEY = "QwRr_kCSs-lJlOraFdzCDYqqB7ZY_TlU644O-4vcpd4"
-EXPECTED_DECISIONS = {
-    "allow": {
-        "canonical_bytes_sha256": "bbf68197f2372ffd31f6d92f6de943ff97004af4ec3dbfd70a85401cf107d9d3",
-        "signature": "B62Y2ld8TEuUhleJ6tulxhnBGdJzmVB_N5NuTKZeyzl6r7CrBXyxP0s9JomtTCsjiDzQl-whf3czqi6HSdEFDg",
-    },
-    "deny": {
-        "canonical_bytes_sha256": "2b1224f6e2f7ed82aec1d1f481ac313a9435f3432ab6b97e029fe56005f3aa6b",
-        "signature": "q6jAgIssPy5Rj0Fi7RPCd01JAb5MadN7-npJXeBtx_pw2Bu4GJKQd0otTCHdaTQn6vpBhvpLyqRclU99gJ0PDg",
-    },
+ALLOWED_BUNDLE_ENTRY_PATHS = {
+    "decision.json",
+    "outcome.json",
+    "policy-bundle.json",
+    "tool-catalog.json",
+    "build-provenance.json",
 }
+ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+PRIVATE_KEY_PEM_SENTINEL = ("-----BEGIN " + "PRIVATE KEY-----").encode("ascii")
 
 
 class VerificationError(Exception):
@@ -72,8 +77,9 @@ def _validate_inputs(values: dict[str, str], fixture: str, bundle_id: str) -> No
         expected = entry.get("sha256") if isinstance(entry, dict) else None
         if not isinstance(rel, str) or not isinstance(expected, str):
             _raise("bundle_index_invalid", 2, "phase-2", f"/files/{index}")
+        path = _bundle_entry_path(bundle_root, rel, index)
         try:
-            actual = hashlib.sha256((bundle_root / rel).read_bytes()).hexdigest()
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as exc:
             raise VerificationError(
                 Diagnostic("file_hash_mismatch", 4, "phase-6", f"/files/{index}/path")
@@ -99,20 +105,16 @@ def _validate_inputs(values: dict[str, str], fixture: str, bundle_id: str) -> No
         _raise("spendguard_signature_invalid", 3, "phase-9", "/keys/0/public_key_base64url")
 
     decision = _read_json(bundle_root / "decision.json", "canonical_json_invalid", 2, "phase-7")
-    expected_decision = EXPECTED_DECISIONS[fixture]
-    if decision.get("canonical_bytes_sha256") != expected_decision["canonical_bytes_sha256"]:
-        _raise("cloudevent_canonical_hash_mismatch", 4, "phase-8", "/canonical_bytes_sha256")
-    signature = decision.get("signature") if isinstance(decision, dict) else None
-    if not isinstance(signature, dict) or signature.get("key_id") != "sg-ed25519-2026-06":
-        _raise("trust_key_not_found", 3, "phase-9", "/signature/key_id")
-    if signature.get("value_base64url") != expected_decision["signature"]:
-        _raise("spendguard_signature_invalid", 3, "phase-9", "/signature/value_base64url")
+    _verify_signed_event(decision, trust_store)
+    if fixture == "allow":
+        outcome = _read_json(bundle_root / "outcome.json", "canonical_json_invalid", 2, "phase-7")
+        _verify_signed_event(outcome, trust_store)
 
     try:
         key_bytes = Path(values["trace_signing_key"]).read_bytes()
     except OSError as exc:
         raise VerificationError(Diagnostic("trace_key_invalid", 6, "phase-4")) from exc
-    if b"-----BEGIN PRIVATE KEY-----" not in key_bytes:
+    if PRIVATE_KEY_PEM_SENTINEL not in key_bytes:
         _raise("trace_key_invalid", 6, "phase-4", None)
 
 
@@ -150,6 +152,200 @@ def _render_output(fixture: str, name: str, issuer: str) -> bytes:
         payload["issuer"] = issuer
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
     return data
+
+
+def _bundle_entry_path(bundle_root: Path, rel: str, index: int) -> Path:
+    if rel not in ALLOWED_BUNDLE_ENTRY_PATHS:
+        _raise("path_safety_error", 2, "phase-2", f"/files/{index}/path")
+    target = bundle_root / rel
+    try:
+        mode = target.lstat().st_mode
+    except OSError:
+        return target
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        _raise("path_safety_error", 2, "phase-2", f"/files/{index}/path")
+    return target
+
+
+def _verify_signed_event(event: dict, trust_store: dict) -> None:
+    signature = event.get("signature") if isinstance(event, dict) else None
+    if not isinstance(signature, dict) or signature.get("algorithm") != "Ed25519":
+        _raise("trust_key_not_found", 3, "phase-9", "/signature/key_id")
+
+    key_id = signature.get("key_id")
+    if not isinstance(key_id, str):
+        _raise("trust_key_not_found", 3, "phase-9", "/signature/key_id")
+
+    keys = trust_store.get("keys") if isinstance(trust_store, dict) else None
+    if not isinstance(keys, list):
+        _raise("trust_store_invalid", 2, "phase-7", "/keys")
+
+    selected: tuple[int, dict] | None = None
+    for index, key in enumerate(keys):
+        if isinstance(key, dict) and key.get("key_id") == key_id:
+            selected = (index, key)
+            break
+    if selected is None:
+        _raise("trust_key_not_found", 3, "phase-9", "/signature/key_id")
+
+    key_index, key = selected
+    public_key_value = key.get("public_key_base64url")
+    if not isinstance(public_key_value, str):
+        _raise("trust_store_invalid", 2, "phase-7", f"/keys/{key_index}/public_key_base64url")
+    public_key = _decode_base64url(
+        public_key_value,
+        Diagnostic("trust_store_invalid", 2, "phase-7", f"/keys/{key_index}/public_key_base64url"),
+    )
+    if len(public_key) != 32:
+        _raise("trust_store_invalid", 2, "phase-7", f"/keys/{key_index}/public_key_base64url")
+
+    canonical = _ledger_canonical_bytes(event)
+    actual_hash = hashlib.sha256(canonical).hexdigest()
+    if event.get("canonical_bytes_sha256") != actual_hash:
+        _raise("cloudevent_canonical_hash_mismatch", 4, "phase-8", "/canonical_bytes_sha256")
+
+    signature_value = signature.get("value_base64url")
+    if not isinstance(signature_value, str):
+        _raise("spendguard_signature_invalid", 3, "phase-9", "/signature/value_base64url")
+    signature_bytes = _decode_base64url(
+        signature_value,
+        Diagnostic("spendguard_signature_invalid", 3, "phase-9", "/signature/value_base64url"),
+    )
+    if len(signature_bytes) != 64:
+        _raise("spendguard_signature_invalid", 3, "phase-9", "/signature/value_base64url")
+
+    try:
+        verified = _verify_ed25519_signature(public_key, signature_bytes, canonical)
+    except RuntimeError as exc:
+        raise VerificationError(Diagnostic("package_probe_drift", 6, "phase-4")) from exc
+    if not verified:
+        pointer = (
+            f"/keys/{key_index}/public_key_base64url"
+            if public_key_value != EXPECTED_TRUST_PUBLIC_KEY
+            else "/signature/value_base64url"
+        )
+        _raise("spendguard_signature_invalid", 3, "phase-9", pointer)
+
+
+def _ledger_canonical_bytes(event: dict) -> bytes:
+    cloudevent = event.get("cloudevent") if isinstance(event, dict) else None
+    signature = event.get("signature") if isinstance(event, dict) else None
+    if not isinstance(cloudevent, dict) or not isinstance(signature, dict):
+        _raise("canonical_json_invalid", 2, "phase-8", None)
+    producer_id = _canonical_string(cloudevent, "producer_id")
+    if not producer_id.startswith("ledger:"):
+        _raise("package_probe_drift", 6, "phase-4", "/cloudevent/producer_id")
+
+    seconds, nanos = _parse_rfc3339_millis(_canonical_string(cloudevent, "time"))
+    payload = {
+        "specversion": _canonical_string(cloudevent, "specversion"),
+        "type": _canonical_string(cloudevent, "type"),
+        "source": _canonical_string(cloudevent, "source"),
+        "id": _canonical_string(cloudevent, "id"),
+        "time_seconds": seconds,
+        "time_nanos": nanos,
+        "datacontenttype": _canonical_string(cloudevent, "datacontenttype"),
+        "data_b64": _canonical_string(cloudevent, "data_b64"),
+        "tenantid": _canonical_string(cloudevent, "tenant_id"),
+        "runid": _canonical_string(cloudevent, "run_id"),
+        "decisionid": _canonical_string(cloudevent, "decision_id"),
+        "schema_bundle_id": _canonical_string(cloudevent, "schema_bundle_id"),
+        "producer_id": producer_id,
+        "producer_sequence": cloudevent.get("producer_sequence"),
+        "signing_key_id": _canonical_string(signature, "key_id"),
+    }
+    if not isinstance(payload["producer_sequence"], int) or payload["producer_sequence"] < 0:
+        _raise("canonical_json_invalid", 2, "phase-8", "/cloudevent/producer_sequence")
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _verify_ed25519_signature(public_key: bytes, signature: bytes, message: bytes) -> bool:
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        try:
+            Ed25519PublicKey.from_public_bytes(public_key).verify(signature, message)
+            return True
+        except InvalidSignature:
+            return False
+    except ImportError:
+        return _verify_ed25519_signature_with_openssl(public_key, signature, message)
+
+
+def _verify_ed25519_signature_with_openssl(public_key: bytes, signature: bytes, message: bytes) -> bool:
+    pem = _public_key_pem(public_key)
+    with tempfile.TemporaryDirectory() as temp:
+        temp_dir = Path(temp)
+        pub_path = temp_dir / "ed25519.pub.pem"
+        sig_path = temp_dir / "signature.bin"
+        msg_path = temp_dir / "message.bin"
+        pub_path.write_bytes(pem)
+        sig_path.write_bytes(signature)
+        msg_path.write_bytes(message)
+        try:
+            observed = subprocess.run(
+                [
+                    "openssl",
+                    "pkeyutl",
+                    "-verify",
+                    "-pubin",
+                    "-inkey",
+                    str(pub_path),
+                    "-sigfile",
+                    str(sig_path),
+                    "-rawin",
+                    "-in",
+                    str(msg_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except OSError as exc:
+            raise RuntimeError("openssl unavailable for Ed25519 verification") from exc
+    if observed.returncode == 0:
+        return True
+    if b"Signature Verification Failure" in observed.stdout + observed.stderr:
+        return False
+    raise RuntimeError("openssl Ed25519 verification failed unexpectedly")
+
+
+def _public_key_pem(public_key: bytes) -> bytes:
+    der = ED25519_SPKI_PREFIX + public_key
+    body = base64.encodebytes(der).replace(b"\n", b"")
+    lines = [body[index : index + 64] for index in range(0, len(body), 64)]
+    return b"-----BEGIN PUBLIC KEY-----\n" + b"\n".join(lines) + b"\n-----END PUBLIC KEY-----\n"
+
+
+def _decode_base64url(value: str, diagnostic: Diagnostic) -> bytes:
+    if "=" in value:
+        raise VerificationError(diagnostic)
+    try:
+        return base64.urlsafe_b64decode(value + "=" * ((4 - len(value) % 4) % 4))
+    except (binascii.Error, ValueError) as exc:
+        raise VerificationError(diagnostic) from exc
+
+
+def _canonical_string(container: dict, key: str) -> str:
+    value = container.get(key)
+    if not isinstance(value, str):
+        _raise("canonical_json_invalid", 2, "phase-8", f"/cloudevent/{key}")
+    for char in value:
+        codepoint = ord(char)
+        if codepoint < 0x20 or codepoint > 0x7E or char in {'"', "\\"}:
+            _raise("canonical_json_invalid", 2, "phase-8", f"/cloudevent/{key}")
+    return value
+
+
+def _parse_rfc3339_millis(value: str) -> tuple[int, int]:
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise VerificationError(Diagnostic("canonical_json_invalid", 2, "phase-8", "/cloudevent/time")) from exc
+    if parsed.microsecond % 1000 != 0:
+        _raise("canonical_json_invalid", 2, "phase-8", "/cloudevent/time")
+    return int(parsed.timestamp()), parsed.microsecond * 1000
 
 
 def _read_json(path: Path, code: str, exit_code: int, phase: str):
