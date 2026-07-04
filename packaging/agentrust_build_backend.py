@@ -83,7 +83,7 @@ def _wheel_entries() -> list[tuple[str, bytes]]:
     root = _repo_root()
     entries: list[tuple[str, bytes]] = []
     for path in sorted((root / PACKAGE_NAME).glob("*.py")):
-        if path.name.startswith("_verify_internal"):
+        if not _is_public_package_file(path):
             continue
         entries.append((f"{PACKAGE_NAME}/{path.name}", path.read_bytes()))
     entries.extend(
@@ -104,11 +104,15 @@ def _sdist_entries() -> list[tuple[str, bytes]]:
     ]
     entries: list[tuple[str, bytes]] = []
     for path in source_paths:
-        if path.name.startswith("_verify_internal"):
+        if path.parent.name == PACKAGE_NAME and not _is_public_package_file(path):
             continue
         rel = path.relative_to(root).as_posix()
         entries.append((f"{SDIST_ROOT}/{rel}", path.read_bytes()))
     return sorted(entries, key=lambda item: item[0])
+
+
+def _is_public_package_file(path: Path) -> bool:
+    return path.name not in {"_make_verify.py", "_verify_internal.py"}
 
 
 def _metadata_bytes() -> bytes:

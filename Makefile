@@ -4,8 +4,11 @@
 # operator's entry point for the demo bring-up flow.
 
 .PHONY: try bench demo-up demo-down demo-logs demo-clean demo-build help \
+        verify-agentrust \
         demo-verify-ag-ui-events demo-verify-mastra-processor \
         sdk-ts-proto sdk-ts-proto-check sdk-ts-dist sdk-ts-dist-check
+
+PYTHON ?= python3
 
 help:
 	@echo "Targets:"
@@ -20,6 +23,7 @@ help:
 	@echo "  make sdk-ts-proto-check  CI determinism gate: fail if generated tree drifts"
 	@echo "  make sdk-ts-dist       Rebuild every TS adapter dist/ from source (pnpm -r build)"
 	@echo "  make sdk-ts-dist-check   CI determinism gate: fail if any committed adapter dist is stale"
+	@echo "  make verify-agentrust  Verify the fixture-only AgenTrust community submission artifacts"
 
 demo-up demo-down demo-logs demo-clean demo-build demo-verify-ag-ui-events demo-verify-mastra-processor:
 	$(MAKE) -C deploy/demo $@
@@ -50,3 +54,6 @@ sdk-ts-dist:
 # the bundle the demos + npm tarball ship). Mirrors sdk-ts-proto-check.
 sdk-ts-dist-check:
 	bash scripts/verify-ts-dist-fresh.sh
+
+verify-agentrust:
+	@PYTHONPATH="$(CURDIR)" PYTHONNOUSERSITE=1 "$(PYTHON)" -m spendguard_agentrust._make_verify

@@ -54,6 +54,7 @@ class BuildBackendSmokeTest(unittest.TestCase):
                 )
                 self.assertFalse(any("tests/" in name for name in names))
                 self.assertFalse(any("docs/specs" in name for name in names))
+                self.assertFalse(any("_make_verify" in name for name in names))
                 self.assertFalse(any("_verify_internal" in name for name in names))
                 metadata = archive.read(
                     "spendguard_agentrust-0.1.0a1.dist-info/METADATA"
@@ -85,6 +86,7 @@ class BuildBackendSmokeTest(unittest.TestCase):
         self.assertIn(f"{root}/spendguard_agentrust/diagnostics.py", names)
         self.assertFalse(any("tests/" in name for name in names))
         self.assertFalse(any("docs/specs" in name for name in names))
+        self.assertFalse(any("_make_verify" in name for name in names))
         self.assertFalse(any("_verify_internal" in name for name in names))
 
     def test_artifacts_are_reproducible(self):
