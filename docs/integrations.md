@@ -86,6 +86,17 @@ a `DEMO_MODE` gate (see [Demo modes](#demo-modes) below).
 
 ---
 
+## Governance evidence exports
+
+These integrations export SpendGuard evidence for governance and audit systems.
+They are not framework adapters and do not add new runtime gates by themselves.
+
+| Ecosystem | Status | What gets exported | Spec |
+|---|---|---|---|
+| **AgenTrust** | Planned docs-first target; no Community approval yet | SpendGuard signed spend-control audit decisions as TRACE Level 0 software-only evidence, plus Agent Manifest artifact bindings for policy, tool catalog, evidence-bundle root, and build provenance hashes. Operator-supplied context is labeled separately from signed evidence; v1alpha1 makes no external connector claim. | [AgenTrust integration spec](specs/agentrust-integration-spec-v1alpha1.md) · [public docs](https://agenticspendguard.dev/docs/integrations/agentrust/) |
+
+---
+
 ## Demo modes
 
 Every integration ships a runnable demo gate. Bring one up with `make demo-up

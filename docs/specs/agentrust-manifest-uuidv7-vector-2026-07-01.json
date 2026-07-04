@@ -1,0 +1,57 @@
+{
+  "schema": "spendguard-agentrust-manifest-uuidv7-vector/v1",
+  "vectors": [
+    {
+      "issued_at": "2026-07-01T00:00:00Z",
+      "unix_seconds": 1782864000,
+      "unix_ms": 1782864000000,
+      "evidence_bundle_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "agent_id": "spiffe://spendguard.local/tenant/00000000-0000-4000-8000-000000000001/run/run-demo",
+      "preimage_length": 179,
+      "preimage_sha256": "5f095b6281f32b17a3f47e4d4099e22b908cb1723db9c1bf985d4cfd47b4f5c8",
+      "rand_a_hex": "5f0",
+      "rand_b_hex": "256d8a07ccac5e8f",
+      "low64_hex_after_variant": "a56d8a07ccac5e8f",
+      "manifest_id": "019f1af9-b400-75f0-a56d-8a07ccac5e8f"
+    },
+    {
+      "issued_at": "2026-07-01T00:00:00Z",
+      "unix_seconds": 1782864000,
+      "unix_ms": 1782864000000,
+      "evidence_bundle_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "agent_id": "spiffe://spendguard.local/tenant/00000000-0000-4000-8000-000000000002/run/run-demo-2",
+      "preimage_length": 181,
+      "preimage_sha256": "eeec74cb4f0b699a4d8d963b6f615a2922cd6f9d43707293642e249b96579474",
+      "rand_a_hex": "eee",
+      "rand_b_hex": "31d32d3c2da66936",
+      "low64_hex_after_variant": "b1d32d3c2da66936",
+      "manifest_id": "019f1af9-b400-7eee-b1d3-2d3c2da66936"
+    },
+    {
+      "issued_at": "2026-07-01T00:00:00Z",
+      "unix_seconds": 1782864000,
+      "unix_ms": 1782864000000,
+      "evidence_bundle_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "agent_id": "spiffe://spendguard.local/tenant/00000000-0000-4000-8000-000000000001/run/run-demo",
+      "preimage_length": 179,
+      "preimage_sha256": "4d1ac4d7177e62d93718749844da41a56f38a9fcb8cac08a38a74554e3555c95",
+      "rand_a_hex": "4d1",
+      "rand_b_hex": "2b135c5df98b64dc",
+      "low64_hex_after_variant": "ab135c5df98b64dc",
+      "manifest_id": "019f1af9-b400-74d1-ab13-5c5df98b64dc"
+    },
+    {
+      "issued_at": "2026-07-01T00:00:00Z",
+      "unix_seconds": 1782864000,
+      "unix_ms": 1782864000000,
+      "evidence_bundle_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "agent_id": "spiffe://spendguard.local/tenant/00000000-0000-4000-8000-000000000002/run/run-demo-2",
+      "preimage_length": 181,
+      "preimage_sha256": "19aea8be6a4562b2783e15a97960f88b82cce15ff6d7b755cd83577c95009339",
+      "rand_a_hex": "19a",
+      "rand_b_hex": "3aa2f9a9158ac9e0",
+      "low64_hex_after_variant": "baa2f9a9158ac9e0",
+      "manifest_id": "019f1af9-b400-719a-baa2-f9a9158ac9e0"
+    }
+  ]
+}

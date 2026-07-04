@@ -1,0 +1,422 @@
+{
+  "schema": "spendguard-agentrust-schema-source/v1alpha1",
+  "status": "docs-first-community-source",
+  "dialect": "json-schema-2020-12",
+  "scope": "community-submission",
+  "token_definitions": {
+    "absolute_uri_prefix": "absolute URI prefix string, 1..256 bytes, no ASCII control characters",
+    "artifact_source_file": "one of bundle.json, decision.json, outcome.json, policy-bundle.json, tool-catalog.json, build-provenance.json",
+    "bare_sha256": "regex:^[0-9a-f]{64}$, exactly 64 lowercase hex chars",
+    "base64_standard_padded": "RFC 4648 standard base64 with required padding",
+    "base64url_nopad": "RFC 4648 base64url without padding",
+    "base64url_nopad_32_bytes": "base64url_nopad that decodes to exactly 32 bytes",
+    "boolean": "JSON boolean",
+    "bundle_id": "regex:^[a-z0-9][a-z0-9._-]{0,63}$; single path segment; '.' and '..' forbidden",
+    "decision_payload_by_event_type": "decision_payload when cloudevent.type=spendguard.audit.decision; outcome_payload when cloudevent.type=spendguard.audit.outcome",
+    "decision_spendguard_cloudevent": "spendguard_cloudevent with type const:spendguard.audit.decision",
+    "fixture_manifest_path": "one of the committed integrations/agentrust/examples/** fixture files or integrations/agentrust/test-private-keys/*.test.ed25519.pem paths",
+    "fixture_manifest_required_by": "enum:public_fixture|trust_store|trace_test_key|wrong_key_negative",
+    "fixture_manifest_role": "enum:bundle_index|decision_event|outcome_event|policy_bundle|tool_catalog|build_provenance|fixture_trust_store|trace_signing_private_key|wrong_key_private_key",
+    "fixture_media_type": "enum by path: decision.json=application/vnd.spendguard.audit.decision+json; outcome.json=application/vnd.spendguard.audit.outcome+json; policy-bundle.json=application/vnd.spendguard.policy-bundle+json; tool-catalog.json=application/vnd.spendguard.tool-catalog+json; build-provenance.json=application/vnd.spendguard.build-provenance+json",
+    "generated_output_fixture": "enum:allow|deny|make",
+    "generated_output_manifest_path": "one of integrations/agentrust/examples/expected-outputs/{allow,deny}/{trace-level0.json,agent-manifest.json,spendguard-artifacts.json,verification-report.json} or integrations/agentrust/examples/expected-outputs/verify-agentrust-report.json",
+    "generated_output_path": "repo-relative generated output path under integrations/agentrust/out or integrations/agentrust/out/.verify-agentrust/<run-id>",
+    "generated_output_role": "enum:trace_level0|agent_manifest|spendguard_artifacts|verification_report|make_verification_report",
+    "identity_string": "regex:^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$; must not contain '..' or ASCII control characters",
+    "json_pointer": "RFC 6901 absolute JSON pointer string beginning with /",
+    "non_negative_integer": "JSON integer 0..9223372036854775807",
+    "non_empty_string<=128": "string length 1..128 bytes, no ASCII control characters",
+    "non_empty_string<=512": "string length 1..512 bytes, no ASCII control characters",
+    "array:fixture_sha256_manifest_entry": "JSON array with committed fixture_sha256_manifest_entry rows in bytewise path order",
+    "array:generated_output_sha256_manifest_entry": "JSON array with committed generated_output_sha256_manifest_entry rows in bytewise path order",
+    "array:non_empty_string<=128": "JSON array 0..128 entries; each entry is non_empty_string<=128",
+    "array:spendguard_artifacts_row:4": "JSON array with exactly 4 spendguard_artifacts_row entries in spec-defined order",
+    "object:allow,deny": "closed object with exactly allow and deny keys; each value is bundle_id",
+    "object:allow,deny_success_fixture_result": "closed object with exactly allow and deny keys, each value success_fixture_result",
+    "object:conformance_check_results": "closed object with exactly artifact_preflight_envelope, event_type_binding, fixture_identity, internal_guard, manifest_issuer_variant, package_guard_surfaces, private_parser_matrix, public_parser_matrix keys; each value is conformance_check_result",
+    "outcome_spendguard_cloudevent": "spendguard_cloudevent with type const:spendguard.audit.outcome",
+    "object:mutated_signature,wrong_key,mutated_policy_hash,missing_trace_signature": "closed object with exactly mutated_signature, wrong_key, mutated_policy_hash, missing_trace_signature keys; each value is negative_test_result",
+    "positive_decimal_string": "regex:^[1-9][0-9]{0,38}$",
+    "posix_relative_path": "one of the enumerated fixture file names; no slash, backslash, NUL, absolute path, or '..'",
+    "rfc3339_utc_z": "RFC 3339 timestamp normalized to UTC Z with whole-second precision and no timezone offset other than Z",
+    "rfc3339_utc_z_millisecond": "RFC 3339 UTC Z timestamp with exactly three fractional second digits",
+    "sha256_prefixed": "regex:^sha256:[0-9a-f]{64}$",
+    "string": "JSON string",
+    "string<=64": "string length 0..64 bytes, no ASCII control characters",
+    "uuid_v4": "RFC 4122 lowercase UUID with version nibble 4 and variant 8,9,a,b",
+    "uuid_v7": "RFC 9562 lowercase UUID with version nibble 7 and variant 8,9,a,b"
+  },
+  "closed_objects": {
+    "agent_manifest_report": {
+      "required": {
+        "manifest_id": "uuid_v7",
+        "signature_status": "const:unsigned_not_verified",
+        "validator": "const:agent-manifest==0.1.1"
+      },
+      "additionalProperties": false
+    },
+    "audit_signature": {
+      "required": {
+        "algorithm": "const:Ed25519",
+        "key_id": "non_empty_string<=128",
+        "value_base64url": "base64url_nopad"
+      },
+      "additionalProperties": false
+    },
+    "build_provenance": {
+      "required": {
+        "builder": "non_empty_string<=128",
+        "container_image_digest": "sha256_prefixed|null",
+        "release_bundle_digest": "sha256_prefixed|null",
+        "sbom_digest": "sha256_prefixed|null",
+        "source_commit_digest": "sha256_prefixed|null"
+      },
+      "additionalProperties": false
+    },
+    "bundle": {
+      "required": {
+        "version": "const:spendguard-agentrust-evidence/v1",
+        "bundle_id": "bundle_id",
+        "created_at": "rfc3339_utc_z_millisecond",
+        "tenant_id": "uuid_v4",
+        "run_id": "identity_string",
+        "decision_id": "uuid_v7",
+        "decision_path": "enum:allow|deny",
+        "evidence_bundle_hash": "sha256_prefixed",
+        "files": "array:file_entry"
+      },
+      "additionalProperties": false
+    },
+    "decision_event_file": {
+      "required": {
+        "schema": "const:spendguard-agentrust-decision-event/v1",
+        "cloudevent": "decision_spendguard_cloudevent",
+        "canonical_bytes_sha256": "bare_sha256",
+        "signature": "audit_signature"
+      },
+      "additionalProperties": false
+    },
+    "decision_payload": {
+      "required": {
+        "reason_codes": "array:non_empty_string<=128",
+        "matched_rules": "array:non_empty_string<=128",
+        "snapshot_hash": "sha256_prefixed",
+        "spendguard": "payload_spendguard_bindings",
+        "model": "model_identity_payload",
+        "data_class": "non_empty_string<=128"
+      },
+      "additionalProperties": false
+    },
+    "digest_report": {
+      "required": {
+        "evidence_bundle_hash": "sha256_prefixed",
+        "decision_file_sha256": "sha256_prefixed",
+        "outcome_file_sha256": "sha256_prefixed|null",
+        "policy_file_sha256": "sha256_prefixed",
+        "tool_file_sha256": "sha256_prefixed",
+        "build_file_sha256": "sha256_prefixed"
+      },
+      "additionalProperties": false
+    },
+    "error_object": {
+      "required": {
+        "code": "non_empty_string<=128",
+        "message": "non_empty_string<=512",
+        "json_pointer": "json_pointer|null"
+      },
+      "additionalProperties": false
+    },
+    "failure_report": {
+      "required": {
+        "schema": "const:spendguard-agentrust-failure-report/v1",
+        "bundle_id": "bundle_id|null",
+        "mode": "const:fixture|null",
+        "exit_code": "enum:2|3|4|5|6",
+        "phase": "string<=64",
+        "errors": "array:error_object<=128",
+        "created_at": "rfc3339_utc_z"
+      },
+      "additionalProperties": false
+    },
+    "file_entry": {
+      "required": {
+        "path": "enum:decision.json|outcome.json|policy-bundle.json|tool-catalog.json|build-provenance.json",
+        "media_type": "fixture_media_type",
+        "sha256": "bare_sha256"
+      },
+      "additionalProperties": false
+    },
+    "filesystem_report": {
+      "required": {
+        "bundle_realpath": "string",
+        "out_dir_realpath": "string",
+        "output_path": "string",
+        "symlink_policy": "const:reject_bundle_and_output_symlinks"
+      },
+      "additionalProperties": false
+    },
+    "fixture_audit_key": {
+      "required": {
+        "key_id": "non_empty_string<=128",
+        "algorithm": "const:Ed25519",
+        "public_key_base64url": "base64url_nopad_32_bytes",
+        "allowed_tenant_ids": "array:uuid_v4",
+        "allowed_producer_ids": "array:identity_string",
+        "allowed_subject_prefixes": "array:absolute_uri_prefix",
+        "environment": "const:fixture",
+        "not_before": "rfc3339_utc_z",
+        "not_after": "rfc3339_utc_z",
+        "revoked_at": "null"
+      },
+      "additionalProperties": false
+    },
+    "fixture_trust_store": {
+      "required": {
+        "version": "const:spendguard-agentrust-trust-store/v1",
+        "keys": "array:fixture_audit_key"
+      },
+      "additionalProperties": false
+    },
+    "fixture_sha256_manifest_entry": {
+      "required": {
+        "path": "fixture_manifest_path",
+        "role": "fixture_manifest_role",
+        "sha256": "bare_sha256",
+        "required_by": "fixture_manifest_required_by"
+      },
+      "additionalProperties": false
+    },
+    "fixture_sha256_manifest": {
+      "required": {
+        "schema": "const:spendguard-agentrust-fixture-sha256-manifest/v1alpha1",
+        "created_at": "rfc3339_utc_z",
+        "expected_bundle_ids": "object:allow,deny",
+        "expected_spendguard_key_id": "non_empty_string<=128",
+        "wrong_key_public_key_base64url": "base64url_nopad_32_bytes",
+        "entries": "array:fixture_sha256_manifest_entry"
+      },
+      "additionalProperties": false
+    },
+    "generated_output_sha256_manifest_entry": {
+      "required": {
+        "path": "generated_output_manifest_path",
+        "fixture": "generated_output_fixture",
+        "role": "generated_output_role",
+        "generated_path": "generated_output_path",
+        "sha256": "bare_sha256"
+      },
+      "additionalProperties": false
+    },
+    "generated_output_sha256_manifest": {
+      "required": {
+        "schema": "const:spendguard-agentrust-generated-output-sha256-manifest/v1alpha1",
+        "created_at": "rfc3339_utc_z",
+        "public_out_dir": "const:integrations/agentrust/out",
+        "entries": "array:generated_output_sha256_manifest_entry"
+      },
+      "additionalProperties": false
+    },
+    "make_verification_report": {
+      "required": {
+        "schema": "const:spendguard-agentrust-make-verification-report/v1",
+        "mode": "const:fixture",
+        "package_versions": "package_versions_report",
+        "success_fixtures": "object:allow,deny_success_fixture_result",
+        "negative_tests": "object:mutated_signature,wrong_key,mutated_policy_hash,missing_trace_signature",
+        "conformance_checks": "object:conformance_check_results",
+        "status": "enum:pass|fail"
+      },
+      "additionalProperties": false
+    },
+    "model_identity_payload": {
+      "required": {
+        "provider": "non_empty_string<=128",
+        "model_id": "non_empty_string<=128",
+        "version": "non_empty_string<=128"
+      },
+      "additionalProperties": false
+    },
+    "negative_test_result": {
+      "required": {
+        "status": "enum:pass|fail|not_run",
+        "expected_exit_code": "enum:2|3|4|5",
+        "observed_exit_code": "enum:2|3|4|5|null",
+        "diagnostic_code": "non_empty_string<=128|null",
+        "outputs_absent": "boolean"
+      },
+      "additionalProperties": false
+    },
+    "outcome_event_file": {
+      "required": {
+        "schema": "const:spendguard-agentrust-outcome-event/v1",
+        "cloudevent": "outcome_spendguard_cloudevent",
+        "canonical_bytes_sha256": "bare_sha256",
+        "signature": "audit_signature"
+      },
+      "additionalProperties": false
+    },
+    "conformance_check_result": {
+      "required": {
+        "status": "enum:pass|fail|not_run",
+        "diagnostic_code": "non_empty_string<=128|null"
+      },
+      "additionalProperties": false
+    },
+    "success_fixture_result": {
+      "required": {
+        "status": "enum:pass|fail|not_run",
+        "bundle_id": "bundle_id|null",
+        "outputs_match": "boolean",
+        "diagnostic_code": "non_empty_string<=128|null"
+      },
+      "additionalProperties": false
+    },
+    "outcome_payload": {
+      "required": {
+        "kind": "non_empty_string<=128",
+        "decision_id": "uuid_v7",
+        "reservation_id": "uuid_v4",
+        "estimated_amount_atomic": "positive_decimal_string"
+      },
+      "additionalProperties": false
+    },
+    "outputs_report": {
+      "required": {
+        "selected_outputs": "const:[trace,agent_manifest,spendguard_artifacts]",
+        "trace_level0_path": "const:trace-level0.json",
+        "agent_manifest_path": "const:agent-manifest.json",
+        "spendguard_artifacts_path": "const:spendguard-artifacts.json"
+      },
+      "additionalProperties": false
+    },
+    "package_versions_report": {
+      "required": {
+        "agentrust-trace": "const:0.2.0",
+        "agentrust-trace-tests": "const:0.1.0",
+        "agent-manifest": "const:0.1.1"
+      },
+      "additionalProperties": false
+    },
+    "payload_build_bindings": {
+      "required": {
+        "container_image_digest": "sha256_prefixed|null",
+        "release_bundle_digest": "sha256_prefixed|null",
+        "sbom_digest": "sha256_prefixed|null",
+        "source_commit_digest": "sha256_prefixed|null"
+      },
+      "additionalProperties": false
+    },
+    "payload_spendguard_bindings": {
+      "required": {
+        "policy_bundle_hash": "sha256_prefixed",
+        "tool_catalog_hash": "sha256_prefixed",
+        "build": "payload_build_bindings"
+      },
+      "additionalProperties": false
+    },
+    "policy_bundle": {
+      "required": {
+        "schema": "const:spendguard-policy-bundle/v1",
+        "policy_bundle_hash": "sha256_prefixed",
+        "enforcement_mode": "enum:enforce|dry_run",
+        "system_prompt_hash": "sha256_prefixed|null"
+      },
+      "additionalProperties": false
+    },
+    "spendguard_artifacts_row": {
+      "required": {
+        "id": "enum:spendguard.policy_bundle|spendguard.tool_catalog|spendguard.audit_evidence|spendguard.build_provenance",
+        "media_type": "non_empty_string<=128",
+        "binding_digest": "sha256_prefixed",
+        "source_file_digest": "sha256_prefixed",
+        "evidence_level": "enum:signed_event_field|verified_bundle_root|operator_supplied_context",
+        "signed_source": "json_pointer|null",
+        "source_file": "artifact_source_file"
+      },
+      "additionalProperties": false
+    },
+    "spendguard_artifacts": {
+      "required": {
+        "schema": "const:spendguard-agentrust-artifacts/v1",
+        "artifacts": "array:spendguard_artifacts_row:4"
+      },
+      "additionalProperties": false
+    },
+    "spendguard_cloudevent": {
+      "required": {
+        "specversion": "const:1.0",
+        "id": "uuid_v7",
+        "source": "absolute_uri_prefix",
+        "type": "enum:spendguard.audit.decision|spendguard.audit.outcome",
+        "time": "rfc3339_utc_z_millisecond",
+        "datacontenttype": "const:application/json",
+        "tenant_id": "uuid_v4",
+        "run_id": "identity_string",
+        "decision_id": "uuid_v7",
+        "schema_bundle_id": "identity_string",
+        "producer_id": "identity_string",
+        "producer_sequence": "non_negative_integer",
+        "data_b64": "base64_standard_padded",
+        "data_json": "decision_payload_by_event_type"
+      },
+      "additionalProperties": false
+    },
+    "spendguard_verification_report": {
+      "required": {
+        "subject": "absolute_uri_prefix",
+        "decision_event_id": "uuid_v7",
+        "outcome_event_id": "uuid_v7|null",
+        "derived_decision_path": "enum:allow|deny",
+        "trust_store_key_id": "non_empty_string<=128"
+      },
+      "additionalProperties": false
+    },
+    "tool_catalog": {
+      "required": {
+        "schema": "const:spendguard-tool-catalog/v1",
+        "catalog_hash": "sha256_prefixed",
+        "tools_hash": "sha256_prefixed|null"
+      },
+      "additionalProperties": false
+    },
+    "replay_cache_report": {
+      "required": {
+        "status": "const:not_applicable_fixture",
+        "path": "null",
+        "operation_id": "null",
+        "replay_at": "null"
+      },
+      "additionalProperties": false
+    },
+    "trace_exporter_report": {
+      "required": {
+        "key_path": "const:integrations/agentrust/test-private-keys/*.test.ed25519.pem",
+        "key_scope": "const:committed_test_key",
+        "validator": "const:agentrust-trace==0.2.0",
+        "signature_status": "const:trace_package_signed",
+        "warning": "const:TRACE signed by committed test fixture key; not production trust evidence"
+      },
+      "additionalProperties": false
+    },
+    "verification_report": {
+      "required": {
+        "schema": "const:spendguard-agentrust-verification-report/v1",
+        "bundle_id": "bundle_id",
+        "mode": "const:fixture",
+        "package_versions": "package_versions_report",
+        "inputs": "digest_report",
+        "spendguard_verification": "spendguard_verification_report",
+        "outputs": "outputs_report",
+        "replay_cache": "replay_cache_report",
+        "filesystem": "filesystem_report",
+        "trace_exporter": "trace_exporter_report",
+        "digests": "digest_report",
+        "agent_manifest": "agent_manifest_report",
+        "negative_tests_scope": "enum:make_verify_agentrust|single_bundle_not_run",
+        "negative_tests": "object:mutated_signature,wrong_key,mutated_policy_hash,missing_trace_signature",
+        "status": "const:pass"
+      },
+      "additionalProperties": false
+    }
+  }
+}
