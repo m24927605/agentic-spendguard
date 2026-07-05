@@ -89,7 +89,7 @@ slice,review_bundle_section,owned_files,tests,command_or_job,artifacts,report_or
 | 11 Make report | `Generated Outputs And Make Continuation`, `Evidence Payload` | `report.py`, `_make_verify.py` | `test_make_verify_target.py`, `test_make_verify_report.py` | focused unittest make-report lane | aggregate report | aggregate report rows, including `internal_guard`, `manifest_issuer_variant`, `private_parser_matrix` | malformed stderr and missing report |
 | 12 Package guard | `Gate Clarifications` | `package_guard.py`, `packaging/agentrust_build_backend.py`, `_make_verify.py` | `test_build_backend.py`, `test_package_guard.py`, `test_artifact_lane.py` | artifact-lane command from `_make_verify.py` | wheel, sdist, metadata, scripts | `package_guard_surfaces` | PEM bytes, private surface, unsafe archive member |
 | 13 Full CI | `Gate Clarifications` | `.github/workflows/agentrust-conformance.yml`, `.github/workflows/agentrust-fixture.yml`, `Makefile`, docs if target names change | workflow run | `verify-agentrust-ubuntu-24.04` | GitHub Actions check | CI check conclusion | unsupported platform/non-root preflight failure |
-| 14 Promotion/docs | `Scope`, `Gate Clarifications` | `Makefile`, `docs/integrations.md`, `docs/site/docs/integrations/agentrust.md`, `docs/site-v2/src/content/docs/docs/integrations/agentrust.mdx`, `pyproject.toml`, `docs/specs/agentrust-operator-preview-notes-v1alpha1.md`, `docs/specs/agentrust-submission-checklist-v1alpha1.md` | final review | `make verify-agentrust`, `codex-review final` | submission packet docs | final gate evidence | forbidden public claim scan |
+| 14 Promotion/docs | `Scope`, `Gate Clarifications` | `Makefile`, `docs/integrations.md`, `docs/site/docs/integrations/agentrust.md`, `docs/site-v2/src/content/docs/docs/integrations/agentrust.mdx`, `pyproject.toml`, `docs/specs/agentrust-operator-preview-notes-v1alpha1.md`, `docs/specs/agentrust-submission-checklist-v1alpha1.md` | final review | promoted `make verify-agentrust`, post-promotion `verify-agentrust-ubuntu-24.04`, `codex-review final` | submission packet docs | final gate evidence | forbidden public claim scan |
 
 Plan review must reject this plan if any slice row loses its review-bundle
 section, owned files, tests, command/job, artifacts, evidence row, or failure
@@ -138,17 +138,23 @@ Acceptance:
 - Full-target stubs fail non-success until their owned checks are implemented,
   so no incomplete full target can look green.
 - Target tests prove the smoke/full/promotion names are distinct.
-- The expected pending full-target failure before Slice 13 is exit 6 with a
-  single compact setup/final diagnostic JSON on stderr, empty stdout, and no
-  make-summary stderr. Make-summary stderr is reserved for exit 1 aggregate
-  failures.
+- The expected pending full-target raw diagnostic before Slice 13 is produced by
+  a direct make-internal Python harness command, not by parsing standard `make`
+  stderr. The raw harness exits 6, writes one compact setup/final diagnostic JSON
+  document to stderr, and writes empty stdout.
+- `make verify-agentrust-full` remains a standard make target: before Slice 13 it
+  must fail non-successfully and keep stdout empty, but tests must not require
+  GNU/BSD make to preserve the harness exit code or keep stderr JSON-only.
+  Make-summary stderr is reserved for exit 1 aggregate failures after report
+  generation exists.
 
 Verification:
 
 ```bash
 PYTHONPATH="$PWD" PYTHONNOUSERSITE=1 python3 -m unittest discover -s tests/agentrust -p '*make*target*.py'
 PYTHON=python3 PYTHONPATH="$PWD" PYTHONNOUSERSITE=1 make verify-agentrust-fixture
-set +e; PYTHON=python3 PYTHONPATH="$PWD" PYTHONNOUSERSITE=1 make verify-agentrust-full > /tmp/agentrust-full.out 2> /tmp/agentrust-full.err; status=$?; set -e; test "$status" -eq 6; test ! -s /tmp/agentrust-full.out; python3 -m json.tool /tmp/agentrust-full.err >/dev/null
+set +e; PYTHONPATH="$PWD" PYTHONNOUSERSITE=1 python3 -m spendguard_agentrust._make_verify verify-full > /tmp/agentrust-full.raw.out 2> /tmp/agentrust-full.raw.err; raw_status=$?; set -e; test "$raw_status" -eq 6; test ! -s /tmp/agentrust-full.raw.out; python3 -m json.tool /tmp/agentrust-full.raw.err >/dev/null
+set +e; PYTHON=python3 PYTHONPATH="$PWD" PYTHONNOUSERSITE=1 make verify-agentrust-full > /tmp/agentrust-full.make.out 2> /tmp/agentrust-full.make.err; make_status=$?; set -e; test "$make_status" -ne 0; test ! -s /tmp/agentrust-full.make.out; rg '"exit_code":6|"deferred_fixture_mvp"|Error' /tmp/agentrust-full.make.err >/dev/null
 ```
 
 ## Slice 2 - Runtime Read-Boundary Instrumentation
@@ -586,6 +592,9 @@ Acceptance:
   non-conformance-only.
 - `make verify-agentrust-full` remains available as the implementation target or
   becomes an alias of `make verify-agentrust`.
+- The `verify-agentrust-ubuntu-24.04` GitHub Actions job is rerun after
+  promotion and proves the promoted `make verify-agentrust` target, not only the
+  pre-promotion `make verify-agentrust-full` target.
 - Public docs may say "ready for upstream Community submission preparation" only
   after all gates pass.
 - Public docs still do not say upstream approved unless upstream approval has
@@ -600,6 +609,13 @@ Verification:
 python3 docs/specs/check-agentrust-vectors.py
 PYTHONPATH="$PWD" PYTHONNOUSERSITE=1 python3 -m unittest discover -s tests/agentrust
 PYTHON=python3 PYTHONPATH="$PWD" PYTHONNOUSERSITE=1 make verify-agentrust
+BRANCH=$(git branch --show-current)
+SHA=$(git rev-parse HEAD)
+gh workflow run agentrust-conformance.yml --ref "$BRANCH"
+RUN_ID=$(gh run list --workflow agentrust-conformance.yml --branch "$BRANCH" --commit "$SHA" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "$RUN_ID" --exit-status
+JOB_ID=$(gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.name=="verify-agentrust-ubuntu-24.04") | .databaseId')
+gh run view "$RUN_ID" --job "$JOB_ID" --log | rg 'make verify-agentrust([^_-]|$)'
 git diff --check origin/main...HEAD
 CODEX_REVIEW_ITERATION=1 ~/.Codex/hooks/codex-review.sh final branch:main --project-dir "$PWD"
 ```
