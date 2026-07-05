@@ -13,6 +13,7 @@ import tempfile
 import zipfile
 
 from .fixture_outputs import ALL_OUTPUTS, BUNDLE_IDS, OUTPUT_BYTES, SELECTED_OUTPUTS
+from .diagnostics import Diagnostic, diagnostic_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +41,29 @@ FORBIDDEN_ARTIFACT_MEMBER_MARKERS = {
 }
 
 
-def main() -> int:
+PENDING_TARGET_COMMANDS = {
+    "verify-full",
+    "verify-preflight",
+    "verify-output-lane",
+    "verify-negative-lane",
+    "verify-report-lane",
+    "verify-artifact-lane",
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if not args or args == ["verify-fixture"]:
+        return _run_fixture_smoke()
+    if len(args) == 1 and args[0] in PENDING_TARGET_COMMANDS:
+        return _emit_pending_full_target()
+
+    diagnostic = Diagnostic("unknown_make_verify_command", 2, "make-setup")
+    sys.stderr.write(diagnostic_json(diagnostic))
+    return diagnostic.exit_code
+
+
+def _run_fixture_smoke() -> int:
     try:
         run_root = _new_run_root()
         _prepare_trace_key(run_root)
@@ -60,6 +83,12 @@ def main() -> int:
 
     sys.stdout.write("agentrust_make_verify=pass\n")
     return 0
+
+
+def _emit_pending_full_target() -> int:
+    diagnostic = Diagnostic("deferred_fixture_mvp", 6, "make-setup")
+    sys.stderr.write(diagnostic_json(diagnostic))
+    return diagnostic.exit_code
 
 
 def _base_env() -> dict[str, str]:
