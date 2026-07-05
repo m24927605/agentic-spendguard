@@ -1,0 +1,72 @@
+name: AgenTrust fixture CI
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/agentrust-fixture.yml"
+      - "AGENTS.md"
+      - "Makefile"
+      - "pyproject.toml"
+      - "packaging/agentrust_build_backend.py"
+      - "spendguard_agentrust/**"
+      - "tests/agentrust/**"
+      - "integrations/agentrust/**"
+      - "docs/specs/agentrust-*"
+      - "docs/specs/check-agentrust-vectors.py"
+      - "docs/integrations.md"
+      - "docs/site/docs/integrations/agentrust.md"
+      - "docs/site-v2/src/content/docs/docs/integrations/agentrust.mdx"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/agentrust-fixture.yml"
+      - "AGENTS.md"
+      - "Makefile"
+      - "pyproject.toml"
+      - "packaging/agentrust_build_backend.py"
+      - "spendguard_agentrust/**"
+      - "tests/agentrust/**"
+      - "integrations/agentrust/**"
+      - "docs/specs/agentrust-*"
+      - "docs/specs/check-agentrust-vectors.py"
+      - "docs/integrations.md"
+      - "docs/site/docs/integrations/agentrust.md"
+      - "docs/site-v2/src/content/docs/docs/integrations/agentrust.mdx"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixture-mvp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: integrations/agentrust/requirements-v1alpha1.lock
+
+      - name: Install AgenTrust fixture dependencies
+        run: python3 -m pip install --require-hashes -r integrations/agentrust/requirements-v1alpha1.lock
+
+      - name: Verify AgenTrust vectors
+        run: python3 docs/specs/check-agentrust-vectors.py
+
+      - name: Run AgenTrust tests
+        run: PYTHONPATH="$PWD" PYTHONNOUSERSITE=1 python3 -m unittest discover -s tests/agentrust
+
+      - name: Run AgenTrust make target
+        run: PYTHON=python3 PYTHONPATH="$PWD" PYTHONNOUSERSITE=1 make verify-agentrust
+
+      - name: Whitespace check
+        run: git diff --check origin/main...HEAD

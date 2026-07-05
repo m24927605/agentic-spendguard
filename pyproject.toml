@@ -1,0 +1,16 @@
+[build-system]
+requires = []
+build-backend = "agentrust_build_backend"
+backend-path = ["packaging"]
+
+[project]
+name = "spendguard-agentrust"
+version = "0.1.0a1"
+description = "Fixture-only SpendGuard AgenTrust verifier"
+requires-python = ">=3.12"
+dependencies = [
+  "agent-manifest==0.1.1",
+  "agentrust-trace==0.2.0",
+  "cryptography==49.0.0",
+  "jsonschema==4.26.0",
+]
