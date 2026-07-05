@@ -22,6 +22,7 @@ The source of truth for wire formats and invariants. Read before changing
 | [calibration-report-spec](calibration-report-spec-v1alpha1.md) · [cold-start-baseline-spec](cold-start-baseline-spec-v1alpha1.md) | Calibration & cold start |
 | [ga-readiness-spec](ga-readiness-spec-v1alpha1.md) · [post-ga-backlog-spec](post-ga-backlog-spec-v1alpha1.md) | GA readiness & backlog |
 | [agentrust-integration-spec](specs/agentrust-integration-spec-v1alpha1.md) | AgenTrust TRACE Level 0 / Agent Manifest export target |
+| [agentrust-full-conformance-spec](specs/agentrust-full-conformance-spec-v1alpha1.md) | Follow-up track from fixture MVP to full AgenTrust v1alpha1 fixture conformance |
 
 More detailed and per-coverage specs live under [`specs/`](specs/).
 
