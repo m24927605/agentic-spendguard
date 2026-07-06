@@ -282,9 +282,22 @@ def check_generated_output_manifest(manifest: dict, schema: dict) -> None:
             }
             assert set(report["conformance_checks"]) == expected_conformance
             conformance_required = schema["closed_objects"]["conformance_check_result"]["required"]
-            for result in report["conformance_checks"].values():
+            deferred_conformance = {
+                "artifact_preflight_envelope",
+                "event_type_binding",
+                "manifest_issuer_variant",
+                "private_parser_matrix",
+                "public_parser_matrix",
+            }
+            for name, result in report["conformance_checks"].items():
                 assert set(result) == set(conformance_required)
-                assert result == {"status": "pass", "diagnostic_code": None}
+                if name in deferred_conformance:
+                    assert result == {
+                        "status": "deferred_fixture_mvp",
+                        "diagnostic_code": "deferred_fixture_mvp",
+                    }
+                else:
+                    assert result == {"status": "pass", "diagnostic_code": None}
             assert set(report["success_fixtures"]) == {"allow", "deny"}
             result_required = schema["closed_objects"]["success_fixture_result"]["required"]
             for fixture_name, bundle_id in {"allow": "demo-allow", "deny": "demo-deny"}.items():

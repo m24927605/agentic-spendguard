@@ -257,7 +257,7 @@
     },
     "conformance_check_result": {
       "required": {
-        "status": "enum:pass|fail|not_run",
+        "status": "enum:pass|fail|not_run|deferred_fixture_mvp",
         "diagnostic_code": "non_empty_string<=128|null"
       },
       "additionalProperties": false

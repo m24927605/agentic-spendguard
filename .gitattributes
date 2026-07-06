@@ -1,0 +1,4 @@
+# Machine-generated AgenTrust evidence payloads are verified by hash/decode
+# checks; treating them as opaque keeps review diffs bounded and useful.
+docs/specs/agentrust-required-artifact-evidence-2026-07-01.json -diff
+docs/specs/agentrust-integration-spec-review-bundle-v1alpha1.md -diff

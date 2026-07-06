@@ -81,7 +81,7 @@ slice,review_bundle_section,owned_files,tests,command_or_job,artifacts,report_or
 | 3 Private harness | `Private And Make Harness`, `Command State Matrix` | `_verify_internal.py`, `_make_verify.py`, `cli.py` | private parser/source gate tests | `python3 -m unittest ...private...` | private diagnostics | `internal_guard`, `private_parser_matrix` | missing env, installed package realpath, bad private grammar |
 | 4 Public parser | `Public CLI`, `Command State Matrix` | `cli.py`, `diagnostics.py` | `test_public_cli_parser.py`, `test_diagnostics.py` | parser and diagnostics unittest commands | diagnostic stderr/stdout bytes | `public_parser_matrix` | unsupported live flag, equals-form cases, bad diagnostic key order |
 | 5 Artifact preflight | `Validation Contract`, `Evidence Payload`, `Gate Clarifications` | `Makefile`, `_make_verify.py`, `c14n.py`, `jsonio.py`, `schemas.py`, `package_contract.py`, `docs/specs/check-agentrust-vectors.py`, `integrations/agentrust/requirements-v1alpha1.lock` | `test_c14n_jsonio.py`, `test_artifact_preflight.py`, `test_artifact_preflight_order.py` | `make verify-agentrust-preflight` and vector checker | generated schema/package constants and pinned artifact hashes | `artifact_preflight_envelope` | payload drift, command evidence mismatch, proto/vector/checker/lock/manifest drift |
-| 6 Linux path/output | `Local Security And Output` | `paths.py`, `output.py`, `diagnostics.py`, `.github/workflows/agentrust-path-safety.yml` | `test_linux_path_safety.py`, `test_output_commit.py` | `agentrust-path-safety.yml` Ubuntu slice job | temp/final output dirs | Linux preflight evidence | symlink output and final-exists cases |
+| 6 Linux path/output | `Local Security And Output` | `paths.py`, `output.py`, `diagnostics.py`, `.github/workflows/agentrust-path-safety.yml` | `test_linux_path_safety.py`, `test_output_commit.py` | `agentrust-path-safety.yml` Ubuntu slice job | temp/final output dirs | Linux preflight evidence | symlink output, final-exists, special mode bits, ACL/xattr, root execution, unsafe repo root, unsupported filesystem, and mountinfo cases |
 | 7 Bundle intake | `Validation Contract` | `bundle.py`, `fixtures.py`, `verify.py` | bundle/file-set tests | `python3 -m unittest discover -s tests/agentrust` | parsed fixture bundle state | `fixture_identity` | wrong file set and raw hash mismatch |
 | 8 Signed event/trust | `Validation Contract`, `Evidence Payload` | `events.py`, `trust.py`, `verify.py` | event/trust tests | `python3 -m unittest discover -s tests/agentrust` | verified signed events | `event_type_binding` | wrong key, bad signature, key-window cases |
 | 9 Lifecycle/bindings/output | `Generated Outputs And Make Continuation` | `lifecycle.py`, `bindings.py`, `trace.py`, `manifest.py`, `verify.py` | `test_lifecycle_bindings.py`, `test_generated_outputs.py` | focused unittest generated-output lane | TRACE, Agent Manifest, artifacts report | generated output validation evidence, `manifest_issuer_variant` | lifecycle mismatch and output validation failure |
@@ -174,6 +174,10 @@ Acceptance:
   outputs, package guard inputs, or public-surface scan fixtures.
 - A deliberate attempted open of a make-only input fails the test.
 - The slice records runtime read-boundary evidence separately from package guard.
+- Slice 2 does not claim full `Local Security And Output` conformance. Linux
+  path/output hardening for setuid/setgid/sticky bits, ACL xattrs, root
+  execution, unsafe repo roots, unsupported mounts, and mountinfo parsing is
+  owned by Slice 6.
 - This is an invariant, not a one-time proof. Slices 7 through 10 must rerun the
   read-boundary regression after adding bundle intake, signed-event handling,
   generated outputs, and private mutation runs.
@@ -305,6 +309,39 @@ Acceptance:
   `renameat2(RENAME_NOREPLACE)`.
 - No copy/link/replace fallback exists for the conformance path.
 - Unsupported Linux environments fail with explicit diagnostics.
+- Linux path safety rejects setuid/setgid/sticky bits, ACL xattrs, root
+  execution, unsafe repo roots, unsupported mounts, and malformed or conflicting
+  `/proc/self/mountinfo` evidence.
+- Slice 6 tests include focused probes for ACL/xattr failure, special mode bits,
+  root execution, unsafe repository roots, unsupported mount filesystems, and
+  malformed or conflicting `/proc/self/mountinfo` rows.
+- Unsafe repository-root and checked-path probes must cover group/world-writable
+  roots, group/other write bits on every accepted input, ancestor, output root,
+  run root, mutation root, listed file, temp child, and final child, wrong-owner
+  roots, owner mismatch below the repo root, root-device drift, symlinks at each
+  checked path component and leaf, hardlinks (`nlink != 1`),
+  device/FIFO/socket nodes, disallowed directory modes, repo root resolving to
+  `/`, deleted cwd, and git/repo-root resolution failures.
+- Stale `.tmp-*` and `.probe-*` cleanup probes must cover safe removal,
+  cleanup failure, symlink residue, unknown children, and unsafe metadata.
+- Mountinfo probes must include malformed rows, duplicate/conflicting mount
+  records for the repository path, unreadable mountinfo, no matching repository
+  mount entry, and unsupported filesystem types.
+- Xattr probes must separate present `system.posix_acl_*` ACL xattrs from missing
+  xattr support or listing failures such as `flistxattr`
+  `ENOTSUP|EOPNOTSUPP|EPERM|EACCES`.
+- Slice 6 expected diagnostics are pinned to the review bundle: ACL xattrs and
+  unsafe checked-path metadata, repo root `/`, and UID 0/root execution fail
+  `path_safety_error`; missing xattr support,
+  xattr listing failures, unreadable/malformed/no-match/conflicting mountinfo,
+  unsupported filesystems, deleted cwd, git/repo-root resolution failures, stale
+  `.tmp-*`/`.probe-*` cleanup failures, existing final `<bundle_id>` targets,
+  and `renameat2` capability failures fail `output_target_invalid`. Unsafe dot
+  paths or children inside `.tmp-*`/`.probe-*` entries, including symlinks,
+  device nodes, hardlinks, wrong ownership, or disallowed modes, fail
+  `path_safety_error` before cleanup is attempted.
+- This mapping is Slice 6 acceptance only; Slice 2 runtime boundary evidence does
+  not prove these Linux path/output checks.
 
 Verification:
 

@@ -1389,15 +1389,15 @@ committed artifacts by path and SHA-256:
 
 | Artifact | Role | SHA-256 |
 |---|---|---|
-| `docs/specs/agentrust-schema-source-v1alpha1.json` | Compact schema source for closed local objects. | `a926fc2bd2fbd8f160b2f602fbb76c549ed173f0fe28ec8bd34ff5c7a041ab4d` |
+| `docs/specs/agentrust-schema-source-v1alpha1.json` | Compact schema source for closed local objects. | `04b19e11ad39a0717774a2725dba9c3eab8ce4a8f72a7a2f0a8f93426d7ed54f` |
 | `docs/specs/agentrust-package-probe-2026-07-01.json` | Package/API compatibility probe for accepted AgenTrust packages. | `6eb4331cd54f33e83e0e32f023332f3fd52ef0d9782187eba2a0d8729b52c68b` |
 | `docs/specs/agentrust-bundle-root-vector-2026-07-01.json` | Evidence-bundle root canonicalization vector. | `d52305368187a3b1e1a0c8afc12ef45103a1e63bdfb01eff0d3f858df38dacce` |
 | `docs/specs/agentrust-manifest-uuidv7-vector-2026-07-01.json` | Deterministic Manifest UUIDv7 vectors. | `800317f1653d88a60ec57c91b3751dec835d6a43bf99a133dab30dc99ea09d8d` |
 | `docs/specs/agentrust-cloudevent-signature-vector-2026-07-01.json` | SpendGuard CloudEvent protobuf and ledger JSON canonicalization/signature vector. | `1e499623035dad7dcdb4d20c6bcc7167140b8eb9282b4310503cfe35395bc902` |
 | `proto/spendguard/common/v1/common.proto` | Normative `spendguard.common.v1.CloudEvent` descriptor for non-ledger SpendGuard signature verification. | `5326c86ac4f03dd8790af751c80b4358e332fe7904d493ba0c1ef18faefede4a` |
-| `integrations/agentrust/examples/fixture-sha256-manifest.v1alpha1.json` | SHA manifest for committed public fixtures and test keys. | `f44ccf21a4000e58005cd1d1aa072d1e28936ba845c038cc68230347b264764a` |
-| `integrations/agentrust/examples/generated-output-sha256-manifest.v1alpha1.json` | SHA manifest for committed expected generated outputs. | `c8a723ec2fa44839a3c7dbca5e2f0d3348389763ac2b517f1017ea72e6dac0ef` |
-| `docs/specs/check-agentrust-vectors.py` | Executable vector/probe consistency check. | `16c8351c6c281aebe3b7a72f81e349937a1c938abc4ad2dbfe493becbfd14bf1` |
+| `integrations/agentrust/examples/fixture-sha256-manifest.v1alpha1.json` | SHA manifest for committed public fixtures and test keys. | `78ad0d7be7fb2c6eb91105d5fee5964789ce4b8fa161d7087e084ede741e7102` |
+| `integrations/agentrust/examples/generated-output-sha256-manifest.v1alpha1.json` | SHA manifest for committed expected generated outputs. | `def85d6499d48398614736386cdbbd99a03cb44a29378da9aab06f75d42b6058` |
+| `docs/specs/check-agentrust-vectors.py` | Executable vector/probe consistency check. | `eb723e1073576a87e8976b30e7f4eb33840b3237f4b003478c166fa7e0d38366` |
 | `integrations/agentrust/requirements-v1alpha1.lock` | Hash-locked AgenTrust direct and transitive Python package dependencies for conformance. | `e3829562a20a4e5d646c1db0115089e373d71f20db4b1990b63e9de09618cc26` |
 
 All rows are already committed immutable v1alpha1 inputs; implementation reads

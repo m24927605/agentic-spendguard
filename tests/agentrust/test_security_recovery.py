@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil
@@ -10,6 +11,8 @@ import unittest
 from spendguard_agentrust._make_verify import _scan_package_artifact_bytes
 from spendguard_agentrust.verify import (
     VerificationError,
+    _check_cloudevent_canonicalization_probe,
+    _cloudevent_proto_canonical_bytes,
     _ledger_canonical_bytes,
     _verify_ed25519_signature,
     _verify_signed_event,
@@ -79,6 +82,52 @@ class AgenTrustSecurityRecoveryTest(unittest.TestCase):
                 canonical,
             )
         )
+
+    def test_non_ledger_proto_canonical_bytes_match_committed_vector(self):
+        vector = json.loads(
+            (ROOT / "docs" / "specs" / "agentrust-cloudevent-signature-vector-2026-07-01.json").read_text()
+        )
+        ledger_payload = json.loads(vector["ledger_json_branch"]["canonical_bytes_utf8"])
+        event_time = datetime.fromtimestamp(ledger_payload["time_seconds"], timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        ) + f".{ledger_payload['time_nanos'] // 1_000_000:03d}Z"
+        event = {
+            "cloudevent": {
+                "data_b64": vector["payload"]["data_b64_standard_padded"],
+                "data_json": json.loads(vector["payload"]["data_json_canonical_without_lf"]),
+                "datacontenttype": ledger_payload["datacontenttype"],
+                "decision_id": ledger_payload["decisionid"],
+                "id": ledger_payload["id"],
+                "producer_id": vector["proto_branch"]["producer_id"],
+                "producer_sequence": ledger_payload["producer_sequence"],
+                "run_id": ledger_payload["runid"],
+                "schema_bundle_id": ledger_payload["schema_bundle_id"],
+                "source": ledger_payload["source"],
+                "specversion": ledger_payload["specversion"],
+                "tenant_id": ledger_payload["tenantid"],
+                "time": event_time,
+                "type": ledger_payload["type"],
+            },
+            "signature": {"key_id": ledger_payload["signing_key_id"]},
+        }
+        expected = bytes.fromhex(vector["proto_branch"]["canonical_bytes_hex"])
+
+        canonical = _ledger_canonical_bytes(event)
+
+        self.assertEqual(canonical, _cloudevent_proto_canonical_bytes(event))
+        self.assertEqual(expected, canonical)
+        self.assertEqual(
+            vector["proto_branch"]["canonical_bytes_sha256"],
+            __import__("hashlib").sha256(canonical).hexdigest(),
+        )
+        self.assertTrue(
+            _verify_ed25519_signature(
+                b64url_decode(vector["key"]["public_key_base64url"]),
+                b64url_decode(vector["proto_branch"]["signature_base64url"]),
+                canonical,
+            )
+        )
+        _check_cloudevent_canonicalization_probe()
 
     def test_signed_event_verification_rejects_tampered_signature(self):
         event = json.loads(
