@@ -4,7 +4,10 @@
 # operator's entry point for the demo bring-up flow.
 
 .PHONY: try bench demo-up demo-down demo-logs demo-clean demo-build help \
-        verify-agentrust \
+        verify-agentrust verify-agentrust-fixture verify-agentrust-full \
+        verify-agentrust-preflight verify-agentrust-output-lane \
+        verify-agentrust-negative-lane verify-agentrust-report-lane \
+        verify-agentrust-artifact-lane \
         demo-verify-ag-ui-events demo-verify-mastra-processor \
         sdk-ts-proto sdk-ts-proto-check sdk-ts-dist sdk-ts-dist-check
 
@@ -24,6 +27,8 @@ help:
 	@echo "  make sdk-ts-dist       Rebuild every TS adapter dist/ from source (pnpm -r build)"
 	@echo "  make sdk-ts-dist-check   CI determinism gate: fail if any committed adapter dist is stale"
 	@echo "  make verify-agentrust  Verify the fixture-only AgenTrust community submission artifacts"
+	@echo "  make verify-agentrust-fixture  Verify the fast AgenTrust fixture smoke lane"
+	@echo "  make verify-agentrust-full     Pending full AgenTrust conformance gate"
 
 demo-up demo-down demo-logs demo-clean demo-build demo-verify-ag-ui-events demo-verify-mastra-processor:
 	$(MAKE) -C deploy/demo $@
@@ -55,5 +60,25 @@ sdk-ts-dist:
 sdk-ts-dist-check:
 	bash scripts/verify-ts-dist-fresh.sh
 
-verify-agentrust:
-	@PYTHONPATH="$(CURDIR)" PYTHONNOUSERSITE=1 "$(PYTHON)" -m spendguard_agentrust._make_verify
+verify-agentrust: verify-agentrust-fixture
+
+verify-agentrust-fixture:
+	@PYTHONPATH="$(CURDIR)" PYTHONNOUSERSITE=1 "$(PYTHON)" -m spendguard_agentrust._make_verify verify-fixture
+
+verify-agentrust-full:
+	@PYTHONPATH="$(CURDIR)" PYTHONNOUSERSITE=1 "$(PYTHON)" -m spendguard_agentrust._make_verify verify-full
+
+verify-agentrust-preflight:
+	@PYTHONPATH="$(CURDIR)" PYTHONNOUSERSITE=1 "$(PYTHON)" -m spendguard_agentrust._make_verify verify-preflight
+
+verify-agentrust-output-lane:
+	@PYTHONPATH="$(CURDIR)" PYTHONNOUSERSITE=1 "$(PYTHON)" -m spendguard_agentrust._make_verify verify-output-lane
+
+verify-agentrust-negative-lane:
+	@PYTHONPATH="$(CURDIR)" PYTHONNOUSERSITE=1 "$(PYTHON)" -m spendguard_agentrust._make_verify verify-negative-lane
+
+verify-agentrust-report-lane:
+	@PYTHONPATH="$(CURDIR)" PYTHONNOUSERSITE=1 "$(PYTHON)" -m spendguard_agentrust._make_verify verify-report-lane
+
+verify-agentrust-artifact-lane:
+	@PYTHONPATH="$(CURDIR)" PYTHONNOUSERSITE=1 "$(PYTHON)" -m spendguard_agentrust._make_verify verify-artifact-lane
